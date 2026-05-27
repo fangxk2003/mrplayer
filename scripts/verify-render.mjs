@@ -132,8 +132,8 @@ for (const check of checks) {
     const results = [];
     let index = 0;
 
-    function chartStats() {
-      const canvas = document.querySelector('#mzChart');
+    function chartStats(selector) {
+      const canvas = document.querySelector(selector);
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx) {
         return { ok: false };
@@ -181,7 +181,8 @@ for (const check of checks) {
             eventZones: document.querySelectorAll('.event-zone').length,
             eventMarkers: document.querySelectorAll('.event-marker').length,
             coilToggle: Boolean(document.querySelector('#showCoil')?.checked),
-            chart: chartStats(),
+            chart: chartStats('#mzChart'),
+            mxyChart: chartStats('#mxyChart'),
             errors: [...(window.__mrDemoErrors || [])],
           });
           next();
@@ -321,6 +322,48 @@ for (const check of checks) {
       errors: [...(window.__mrDemoErrors || [])],
     };
   })()`);
+  const spinEchoEnvelopeResults = await evaluate(cdp, `(() => {
+    const sequence = document.querySelector('#sequenceType');
+    const frame = document.querySelector('#referenceFrame');
+    const offRes = document.querySelector('#offRes');
+    const envelopeAt = window.__mrDemoGetSpinEchoEnvelope;
+    const probe = window.__mrDemoGetSpinEchoProbe;
+
+    if (!sequence || !frame || !offRes || typeof envelopeAt !== 'function' || typeof probe !== 'function') {
+      return { ok: false, reason: 'Missing spin-echo envelope probes' };
+    }
+
+    sequence.value = 'spin-echo';
+    sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    frame.value = 'rotating';
+    frame.dispatchEvent(new Event('change', { bubbles: true }));
+    offRes.value = '0.45';
+    offRes.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const times = [0.04, 0.16, 0.2];
+    const samples = times.map((time) => {
+      const envelope = envelopeAt(time);
+      const expectedT2Decay = Math.exp(-envelope.timeSinceExcitation / envelope.t2Seconds);
+      const expectedInhomDecay = Number.isFinite(envelope.t2Inhom)
+        ? Math.exp(-envelope.inhomElapsed / envelope.t2Inhom)
+        : 1;
+      return {
+        time,
+        envelope,
+        expectedT2Decay,
+        expectedInhomDecay,
+        expectedTransverse: expectedT2Decay * expectedInhomDecay,
+      };
+    });
+    const inversion = probe();
+
+    return {
+      ok: true,
+      samples,
+      inversion,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
   const tissueResults = await evaluate(cdp, `new Promise((resolve) => {
     const presets = [
       { key: 'whiteMatter', t1: '850', t2: '80' },
@@ -406,6 +449,7 @@ for (const check of checks) {
     frameResults,
     speedResults,
     fieldResults,
+    spinEchoEnvelopeResults,
     tissueResults,
     phantomResults,
   });
@@ -445,6 +489,8 @@ const failed = results.filter((result) => {
       || !sequence.coilToggle
       || !sequence.chart.ok
       || sequence.chart.bright <= 0
+      || !sequence.mxyChart.ok
+      || sequence.mxyChart.bright <= 0
       || (sequence.sequence === 'single-pulse' && !sequence.spinEchoControlsHidden)
       || (sequence.sequence === 'spin-echo' && (
         sequence.spinEchoControlsHidden
@@ -510,7 +556,25 @@ const failed = results.filter((result) => {
     || Math.abs(result.fieldResults.larmorPeriodSeconds - (1 / 63866218.38)) > 1e-16
     || result.fieldResults.fieldReadout !== '1.50 T'
     || result.fieldResults.larmorReadout !== '63.87 MHz'
-    || result.fieldResults.periodReadout !== '15.66 ns';
+    || result.fieldResults.periodReadout !== '15.66 ns'
+    || !result.spinEchoEnvelopeResults.ok
+    || result.spinEchoEnvelopeResults.errors.length > 0
+    || result.spinEchoEnvelopeResults.samples.some((sample) => (
+      Math.abs(sample.envelope.t2Decay - sample.expectedT2Decay) > 1e-10
+      || Math.abs(sample.envelope.inhomDecay - sample.expectedInhomDecay) > 1e-10
+      || Math.abs(sample.envelope.transverse - sample.expectedTransverse) > 1e-10
+    ))
+    || result.spinEchoEnvelopeResults.samples.some((sample) => (
+      sample.time < sample.envelope.refocusStart
+        ? Math.abs(sample.envelope.inhomElapsed - sample.envelope.timeSinceExcitation) > 1e-10
+        : Math.abs(sample.envelope.inhomElapsed - Math.abs(sample.time - sample.envelope.echoTime)) > 1e-10
+    ))
+    || result.spinEchoEnvelopeResults.inversion.startDot <= 0.7
+      * result.spinEchoEnvelopeResults.inversion.beforeLength
+      * result.spinEchoEnvelopeResults.inversion.justAfterStartLength
+    || result.spinEchoEnvelopeResults.inversion.endDot >= -0.2
+      * result.spinEchoEnvelopeResults.inversion.beforeLength
+      * result.spinEchoEnvelopeResults.inversion.afterLength;
 });
 
 console.log(JSON.stringify({ results, events }, null, 2));

@@ -31,7 +31,7 @@ body {
 #app {
   display: grid;
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) 232px;
+  grid-template-rows: minmax(0, 1fr) 302px;
   grid-template-areas:
     "sidebar stage"
     "sidebar timeline";
@@ -484,10 +484,10 @@ select {
   font-weight: 800;
 }
 
-#mzChart {
+.signal-chart {
   display: block;
   width: 100%;
-  height: 72px;
+  height: 54px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   background: #141714;
@@ -500,7 +500,7 @@ select {
 
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(430px, 58vh) auto 252px;
+    grid-template-rows: minmax(430px, 58vh) auto 322px;
     grid-template-areas:
       "stage"
       "sidebar"

@@ -177,7 +177,7 @@
         </div>
       </main>
 
-      <section class="timeline" aria-label="Sequence timing and Mz signal">
+      <section class="timeline" aria-label="Sequence timing and magnetization signals">
         <div class="timeline-topline">
           <div class="timeline-labels">
             <span id="phaseLabelA">RF pulse</span>
@@ -207,7 +207,14 @@
             <span>Mz over time</span>
             <strong id="chartMzReadout">1.00</strong>
           </div>
-          <canvas id="mzChart" width="900" height="120" aria-label="Mz over time chart"></canvas>
+          <canvas id="mzChart" class="signal-chart" width="900" height="90" aria-label="Mz over time chart"></canvas>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-title">
+            <span>Mxy over time</span>
+            <strong id="chartMxyReadout">0.00</strong>
+          </div>
+          <canvas id="mxyChart" class="signal-chart" width="900" height="90" aria-label="Mxy over time chart"></canvas>
         </div>
       </section>
     </div>

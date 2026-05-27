@@ -55,6 +55,8 @@ const outputs = {
   phaseLabelC: document.querySelector('#phaseLabelC'),
   chartMz: document.querySelector('#chartMzReadout'),
   mzChart: document.querySelector('#mzChart'),
+  chartMxy: document.querySelector('#chartMxyReadout'),
+  mxyChart: document.querySelector('#mxyChart'),
   larmor: document.querySelector('#larmorValue'),
   larmorPeriod: document.querySelector('#larmorPeriodValue'),
   loopSelection: document.querySelector('#loopSelection'),
@@ -220,9 +222,11 @@ function updateMoments(sequence = getSequenceConfig()) {
   outputs.mxy.textContent = mxy.toFixed(2);
   outputs.mz.textContent = normMz.toFixed(2);
   outputs.chartMz.textContent = normMz.toFixed(2);
+  outputs.chartMxy.textContent = mxy.toFixed(2);
   outputs.cursor.style.left = `${timeToWindowPercent(localTime, loop)}%`;
   updateCoil(localTime, sequence);
   drawMzChart(localTime, sequence, loop);
+  drawMxyChart(localTime, sequence, loop);
 
   window.__mrDemoStats = {
     ready: true,
@@ -233,6 +237,7 @@ function updateMoments(sequence = getSequenceConfig()) {
     tissuePreset: state.tissuePreset,
     t1Ms: state.t1Ms,
     t2Ms: state.t2Ms,
+    t2InhomMs: Number.isFinite(t2InhomSeconds()) ? t2InhomSeconds() * 1000 : null,
     localTime,
     cycleSeconds: sequence.cycleSeconds,
     rf90Seconds: sequence.rf90Seconds,
@@ -394,13 +399,17 @@ function getSpinEchoMoment(sample, localTime, sequence) {
   const refocus = degToRad(state.refocusAngle);
   const t1Seconds = (state.t1Ms / 1000) * sample.t1Scale;
   const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
+  const localT2Inhom = t2InhomSeconds();
   const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
   const refocusSeconds = Math.max(sequence.refocusSeconds, RF_EPSILON_SECONDS);
   const timeSinceExcitation = Math.max(0, localTime - sequence.rf90Seconds);
   const transverseBase = Math.sin(flip);
-  const t2Decay = Math.exp(-timeSinceExcitation / localT2);
-  let transverse = transverseBase * t2Decay;
-  let phaseSpreadTime = timeSinceExcitation;
+  const echoEnvelope = getSpinEchoEnvelope(localTime, sequence, localT2, localT2Inhom);
+  const refocusing = localTime >= sequence.refocusStart && localTime <= sequence.refocusEnd;
+  const refocused = localTime > sequence.refocusEnd;
+  const refocusScale = refocused ? refocusEfficiency(refocus) : 1;
+  let transverse = transverseBase * echoEnvelope.transverse * refocusScale;
+  let phaseSpreadTime = refocused ? sequence.echoTime - localTime : timeSinceExcitation;
   let mz;
 
   if (localTime < sequence.rf90Seconds) {
@@ -411,22 +420,23 @@ function getSpinEchoMoment(sample, localTime, sequence) {
   } else if (localTime < sequence.refocusStart) {
     mz = recoverMz(Math.cos(flip), timeSinceExcitation, t1Seconds);
   } else if (localTime <= sequence.refocusEnd) {
-    const mzBeforeRefocus = recoverMz(Math.cos(flip), sequence.refocusStart - sequence.rf90Seconds, t1Seconds);
-    const mzAfterRefocus = mzBeforeRefocus * Math.cos(refocus);
     const refocusProgress = smoothstep(clamp((localTime - sequence.refocusStart) / refocusSeconds, 0, 1));
-    mz = lerp(mzBeforeRefocus, mzAfterRefocus, refocusProgress);
-    transverse *= lerp(1, refocusEfficiency(refocus), refocusProgress);
-    phaseSpreadTime = sequence.refocusStart - sequence.rf90Seconds;
+    const beforeVector = getSpinEchoPreRefocusVector(sample, localTime, sequence, localT2, localT2Inhom, t1Seconds, transverseBase);
+    const flippedVector = rotateVectorTowardNegative(beforeVector, refocus * refocusProgress);
+    return {
+      mx: flippedVector.mx,
+      my: flippedVector.my,
+      mz: flippedVector.mz,
+      phase: Math.atan2(flippedVector.my, flippedVector.mx),
+    };
   } else {
     const mzBeforeRefocus = recoverMz(Math.cos(flip), sequence.refocusStart - sequence.rf90Seconds, t1Seconds);
-    const mzAfterRefocus = mzBeforeRefocus * Math.cos(refocus);
+    const mzAfterRefocus = -mzBeforeRefocus * refocusEfficiency(refocus);
     mz = 1 - (1 - mzAfterRefocus) * Math.exp(-(localTime - sequence.refocusEnd) / t1Seconds);
-    transverse *= refocusEfficiency(refocus);
-    phaseSpreadTime = Math.max(0, sequence.echoTime - localTime);
   }
 
   const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * phaseSpreadTime;
-  const phase = TAU * positiveModulo(phaseCycles, 1);
+  const phase = TAU * positiveModulo(phaseCycles, 1) + (refocused || refocusing ? Math.PI : 0);
 
   return {
     mx: transverse * Math.cos(phase),
@@ -444,6 +454,84 @@ function refocusEfficiency(refocusRadians) {
   return Math.sin(refocusRadians / 2) ** 2;
 }
 
+function t2InhomSeconds() {
+  const spreadHz = Math.max(0, state.offRes);
+  if (spreadHz < 1e-6) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return 1 / (TAU * spreadHz);
+}
+
+function getSpinEchoPreRefocusVector(sample, localTime, sequence, t2Seconds, t2Inhom, t1Seconds, transverseBase) {
+  const envelope = getSpinEchoEnvelope(localTime, sequence, t2Seconds, t2Inhom);
+  const transverse = transverseBase * envelope.transverse;
+  const mz = recoverMz(Math.cos(degToRad(state.flipAngle)), envelope.timeSinceExcitation, t1Seconds);
+  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * envelope.timeSinceExcitation;
+  const phase = TAU * positiveModulo(phaseCycles, 1);
+
+  return {
+    mx: transverse * Math.cos(phase),
+    my: transverse * Math.sin(phase),
+    mz,
+    phase,
+  };
+}
+
+function rotateVectorTowardNegative(vector, angle) {
+  const vx = vector.mx;
+  const vy = vector.my;
+  const vz = vector.mz;
+  const magnitude = Math.hypot(vx, vy, vz);
+  if (magnitude < 1e-8) {
+    return { mx: 0, my: 0, mz: 0 };
+  }
+
+  const reference = Math.abs(vz / magnitude) < 0.9
+    ? { x: 0, y: 0, z: 1 }
+    : { x: 1, y: 0, z: 0 };
+  let ax = vy * reference.z - vz * reference.y;
+  let ay = vz * reference.x - vx * reference.z;
+  let az = vx * reference.y - vy * reference.x;
+  const axisLength = Math.hypot(ax, ay, az);
+  ax /= axisLength;
+  ay /= axisLength;
+  az /= axisLength;
+
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const crossX = ay * vz - az * vy;
+  const crossY = az * vx - ax * vz;
+  const crossZ = ax * vy - ay * vx;
+
+  return {
+    mx: vx * cos + crossX * sin,
+    my: vy * cos + crossY * sin,
+    mz: vz * cos + crossZ * sin,
+  };
+}
+
+function getSpinEchoEnvelope(localTime, sequence, t2Seconds, t2Inhom) {
+  const timeSinceExcitation = Math.max(0, localTime - sequence.rf90Seconds);
+  const refocused = localTime > sequence.refocusEnd;
+  const inhomElapsed = refocused
+    ? Math.abs(localTime - sequence.echoTime)
+    : timeSinceExcitation;
+  const t2Decay = Math.exp(-timeSinceExcitation / t2Seconds);
+  const inhomDecay = Number.isFinite(t2Inhom)
+    ? Math.exp(-inhomElapsed / t2Inhom)
+    : 1;
+
+  return {
+    timeSinceExcitation,
+    inhomElapsed,
+    t2Decay,
+    inhomDecay,
+    transverse: t2Decay * inhomDecay,
+    t2Seconds,
+    t2Inhom,
+  };
+}
+
 function averageMzAt(time, sequence) {
   if (samples.length === 0) {
     return 1;
@@ -458,8 +546,59 @@ function averageMzAt(time, sequence) {
   return sumMz / sumRho;
 }
 
+function averageMxyAt(time, sequence) {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  let sumMx = 0;
+  let sumMy = 0;
+  let sumRho = 0;
+  for (const sample of samples) {
+    const moment = getMomentAt(sample, time, sequence);
+    sumMx += moment.mx * sample.rho;
+    sumMy += moment.my * sample.rho;
+    sumRho += sample.rho;
+  }
+  return Math.hypot(sumMx / sumRho, sumMy / sumRho);
+}
+
 function drawMzChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
-  const canvas = outputs.mzChart;
+  drawSignalChart({
+    canvas: outputs.mzChart,
+    localTime,
+    sequence,
+    loop,
+    valueAt: averageMzAt,
+    range: [-1, 1],
+    color: '#f0bd49',
+    labels: ['1', '0', '-1'],
+  });
+}
+
+function drawMxyChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
+  drawSignalChart({
+    canvas: outputs.mxyChart,
+    localTime,
+    sequence,
+    loop,
+    valueAt: averageMxyAt,
+    range: [0, 1],
+    color: '#84d1c5',
+    labels: ['1', '0.5', '0'],
+  });
+}
+
+function drawSignalChart({
+  canvas,
+  localTime,
+  sequence,
+  loop,
+  valueAt,
+  range,
+  color,
+  labels,
+}) {
   const rect = canvas.getBoundingClientRect();
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
   const width = Math.max(1, Math.round(rect.width * pixelRatio));
@@ -504,15 +643,17 @@ function drawMzChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
     }
   }
 
-  ctx.strokeStyle = '#f0bd49';
+  const [minValue, maxValue] = range;
+  ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.beginPath();
   const steps = 150;
   for (let i = 0; i <= steps; i += 1) {
     const time = loop.start + (loop.span * i) / steps;
-    const mz = averageMzAt(time, sequence);
+    const value = valueAt(time, sequence);
+    const normalized = (clamp(value, minValue, maxValue) - minValue) / (maxValue - minValue);
     const x = pad.left + (plotWidth * i) / steps;
-    const y = pad.top + plotHeight * (1 - ((clamp(mz, -1, 1) + 1) / 2));
+    const y = pad.top + plotHeight * (1 - normalized);
     if (i === 0) {
       ctx.moveTo(x, y);
     } else {
@@ -531,9 +672,9 @@ function drawMzChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
 
   ctx.fillStyle = 'rgba(228, 235, 229, 0.76)';
   ctx.font = '700 10px Inter, system-ui, sans-serif';
-  ctx.fillText('1', 8, pad.top + 4);
-  ctx.fillText('0', 8, pad.top + plotHeight / 2 + 4);
-  ctx.fillText('-1', 6, pad.top + plotHeight + 2);
+  ctx.fillText(labels[0], 8, pad.top + 4);
+  ctx.fillText(labels[1], 8, pad.top + plotHeight / 2 + 4);
+  ctx.fillText(labels[2], 8, pad.top + plotHeight + 2);
   ctx.fillStyle = 'rgba(228, 235, 229, 0.68)';
   ctx.font = '700 10px Inter, system-ui, sans-serif';
   ctx.textAlign = 'left';
@@ -937,6 +1078,38 @@ function bindLoopControls() {
     renderTimeline(sequence);
     updateMoments(sequence);
     return { start: loop.start, end: loop.end };
+  };
+
+  window.__mrDemoGetSpinEchoEnvelope = (time) => {
+    const sequence = getSequenceConfig();
+    const envelope = getSpinEchoEnvelope(Number(time), sequence, state.t2Ms / 1000, t2InhomSeconds());
+    return {
+      ...envelope,
+      echoTime: sequence.echoTime,
+      refocusStart: sequence.refocusStart,
+      refocusEnd: sequence.refocusEnd,
+    };
+  };
+
+  window.__mrDemoGetSpinEchoProbe = () => {
+    const sequence = getSequenceConfig();
+    const sample = samples[Math.floor(samples.length / 2)] || samples[0];
+    const delta = Math.min(0.000001, sequence.refocusSeconds / 4);
+    const before = getSpinEchoMoment(sample, sequence.refocusStart - delta, sequence);
+    const justAfterStart = getSpinEchoMoment(sample, sequence.refocusStart + delta, sequence);
+    const after = getSpinEchoMoment(sample, sequence.refocusEnd, sequence);
+    return {
+      before,
+      justAfterStart,
+      after,
+      startDot: before.mx * justAfterStart.mx + before.my * justAfterStart.my + before.mz * justAfterStart.mz,
+      endDot: before.mx * after.mx + before.my * after.my + before.mz * after.mz,
+      beforeLength: Math.hypot(before.mx, before.my, before.mz),
+      justAfterStartLength: Math.hypot(justAfterStart.mx, justAfterStart.my, justAfterStart.mz),
+      afterLength: Math.hypot(after.mx, after.my, after.mz),
+      refocusStart: sequence.refocusStart,
+      refocusEnd: sequence.refocusEnd,
+    };
   };
 }
 
