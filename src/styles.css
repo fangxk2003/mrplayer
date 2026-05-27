@@ -155,6 +155,22 @@ output {
   text-align: right;
 }
 
+.control-readout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  color: #5b625e;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.control-readout strong {
+  color: #087d71;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 input[type="range"] {
   width: 100%;
   accent-color: #087d71;

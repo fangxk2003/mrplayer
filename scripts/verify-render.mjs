@@ -167,10 +167,15 @@ for (const check of checks) {
             sequence,
             value: select.value,
             appSequence: window.__mrDemoStats?.sequence,
+            referenceFrame: window.__mrDemoStats?.referenceFrame,
             samples: window.__mrDemoStats?.samples || 0,
             loopStart: window.__mrDemoStats?.loopStart,
             loopEnd: window.__mrDemoStats?.loopEnd,
             cycleSeconds: window.__mrDemoStats?.cycleSeconds,
+            rf90Seconds: window.__mrDemoStats?.rf90Seconds,
+            refocusSeconds: window.__mrDemoStats?.refocusSeconds,
+            refocusCenter: window.__mrDemoStats?.refocusCenter,
+            echoTime: window.__mrDemoStats?.echoTime,
             hasLoopControls: Boolean(document.querySelector('#loopStrip') && document.querySelector('#loopStartHandle') && document.querySelector('#loopEndHandle')),
             spinEchoControlsHidden: [...document.querySelectorAll('.spin-echo-only')].every((item) => item.hidden),
             eventZones: document.querySelectorAll('.event-zone').length,
@@ -221,6 +226,98 @@ for (const check of checks) {
       eventZones: document.querySelectorAll('#eventTrack .event-zone').length,
       selectionWidth: selection ? Number.parseFloat(getComputedStyle(selection).width) : 0,
       chartBright,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
+  const frameResults = await evaluate(cdp, `(() => {
+    const frame = document.querySelector('#referenceFrame');
+    const sequence = document.querySelector('#sequenceType');
+    if (!frame) {
+      return { ok: false, reason: 'Missing reference frame control' };
+    }
+
+    if (sequence) {
+      sequence.value = 'single-pulse';
+      sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    const setter = window.__mrDemoSetLoopRange;
+    if (typeof setter === 'function') {
+      setter(0.02, 0.12);
+    }
+
+    const samples = [];
+    for (const value of ['laboratory', 'rotating']) {
+      frame.value = value;
+      frame.dispatchEvent(new Event('change', { bubbles: true }));
+      samples.push({
+        value: frame.value,
+        appFrame: window.__mrDemoStats?.referenceFrame,
+        displayedMainFieldCycles: window.__mrDemoStats?.displayedMainFieldCycles,
+        localTime: window.__mrDemoStats?.localTime,
+        larmorHz: window.__mrDemoStats?.larmorHz,
+        phaseLabel: document.querySelector('#phaseLabelB')?.textContent || '',
+      });
+    }
+
+    return {
+      ok: true,
+      samples,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
+  const speedResults = await evaluate(cdp, `(() => {
+    const speed = document.querySelector('#speed');
+    const readout = document.querySelector('#speedValue');
+    if (!speed || !readout) {
+      return { ok: false, reason: 'Missing speed control' };
+    }
+
+    const samples = [];
+    for (const value of ['-9', '-6', '-2', '0', '0.5']) {
+      speed.value = value;
+      speed.dispatchEvent(new Event('input', { bubbles: true }));
+      samples.push({
+        value: speed.value,
+        readout: readout.textContent,
+        appSpeed: window.__mrDemoStats?.speed,
+        slider: window.__mrDemoStats?.speedSlider,
+      });
+    }
+
+    return {
+      ok: true,
+      min: speed.min,
+      max: speed.max,
+      step: speed.step,
+      samples,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
+  const fieldResults = await evaluate(cdp, `(() => {
+    const field = document.querySelector('#b0Rate');
+    const fieldReadout = document.querySelector('#b0Value');
+    const larmorReadout = document.querySelector('#larmorValue');
+    const periodReadout = document.querySelector('#larmorPeriodValue');
+    if (!field || !fieldReadout || !larmorReadout || !periodReadout) {
+      return { ok: false, reason: 'Missing B0/Larmor controls' };
+    }
+
+    field.value = '1.5';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    const stats = window.__mrDemoStats || {};
+    return {
+      ok: true,
+      min: field.min,
+      max: field.max,
+      step: field.step,
+      value: field.value,
+      fieldReadout: fieldReadout.textContent,
+      larmorReadout: larmorReadout.textContent,
+      periodReadout: periodReadout.textContent,
+      b0Tesla: stats.b0Tesla,
+      larmorHz: stats.larmorHz,
+      larmorPeriodSeconds: stats.larmorPeriodSeconds,
       errors: [...(window.__mrDemoErrors || [])],
     };
   })()`);
@@ -300,7 +397,18 @@ for (const check of checks) {
 
     next();
   })`);
-  results.push({ ...check, stats, styleResults, sequenceResults, loopResults, tissueResults, phantomResults });
+  results.push({
+    ...check,
+    stats,
+    styleResults,
+    sequenceResults,
+    loopResults,
+    frameResults,
+    speedResults,
+    fieldResults,
+    tissueResults,
+    phantomResults,
+  });
 }
 
 await cdp.send('Page.close').catch(() => {});
@@ -323,11 +431,17 @@ const failed = results.filter((result) => {
     || result.sequenceResults.some((sequence) => (
       sequence.value !== sequence.sequence
       || sequence.appSequence !== sequence.sequence
+      || !['laboratory', 'rotating'].includes(sequence.referenceFrame)
       || sequence.samples <= 0
       || sequence.errors.length > 0
       || !sequence.hasLoopControls
       || sequence.loopEnd <= sequence.loopStart
       || sequence.loopEnd >= sequence.cycleSeconds
+      || Math.abs(sequence.rf90Seconds - 0.003) > 0.00001
+      || (sequence.sequence === 'spin-echo' && (
+        Math.abs(sequence.refocusSeconds - 0.006) > 0.00001
+        || Math.abs(sequence.refocusCenter - sequence.echoTime / 2) > 0.00001
+      ))
       || !sequence.coilToggle
       || !sequence.chart.ok
       || sequence.chart.bright <= 0
@@ -362,7 +476,41 @@ const failed = results.filter((result) => {
     || result.loopResults.localTime < result.loopResults.loopStart
     || result.loopResults.localTime > result.loopResults.loopEnd
     || result.loopResults.selectionWidth <= 0
-    || result.loopResults.chartBright <= 0;
+    || result.loopResults.chartBright <= 0
+    || !result.frameResults.ok
+    || result.frameResults.errors.length > 0
+    || result.frameResults.samples.length !== 2
+    || result.frameResults.samples.some((sample) => sample.value !== sample.appFrame)
+    || result.frameResults.samples.some((sample) => (
+      sample.value === 'laboratory'
+      && Math.abs(sample.displayedMainFieldCycles - sample.larmorHz * sample.localTime) > 0.01
+    ))
+    || result.frameResults.samples.some((sample) => (
+      sample.value === 'rotating'
+      && (Math.abs(sample.displayedMainFieldCycles) > 0.000001 || sample.phaseLabel !== 'Rotating-frame off-resonance')
+    ))
+    || !result.speedResults.ok
+    || result.speedResults.errors.length > 0
+    || result.speedResults.min !== '-9'
+    || result.speedResults.max !== '0.5'
+    || result.speedResults.step !== '0.01'
+    || result.speedResults.samples.some((sample) => {
+      const expected = 10 ** Number(sample.value);
+      return Math.abs(sample.appSpeed - expected) > 0.000001
+        || Number(sample.slider) !== Number(sample.value)
+        || !sample.readout.endsWith('x');
+    })
+    || !result.fieldResults.ok
+    || result.fieldResults.errors.length > 0
+    || result.fieldResults.min !== '0.05'
+    || result.fieldResults.max !== '7'
+    || result.fieldResults.step !== '0.05'
+    || Math.abs(result.fieldResults.b0Tesla - 1.5) > 0.000001
+    || Math.abs(result.fieldResults.larmorHz - 63866218.38) > 2
+    || Math.abs(result.fieldResults.larmorPeriodSeconds - (1 / 63866218.38)) > 1e-16
+    || result.fieldResults.fieldReadout !== '1.50 T'
+    || result.fieldResults.larmorReadout !== '63.87 MHz'
+    || result.fieldResults.periodReadout !== '15.66 ns';
 });
 
 console.log(JSON.stringify({ results, events }, null, 2));

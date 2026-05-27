@@ -32,8 +32,8 @@
             </div>
           </div>
           <label class="control">
-            <span>Animation speed <output id="speedValue">1.0x</output></span>
-            <input id="speed" type="range" min="0.2" max="2.5" step="0.1" value="1" />
+            <span>Animation speed <output id="speedValue">1e-9x</output></span>
+            <input id="speed" type="range" min="-9" max="0.5" step="0.01" value="-9" />
           </label>
         </section>
 
@@ -49,6 +49,13 @@
             </select>
           </label>
           <label class="control">
+            <span>Reference frame</span>
+            <select id="referenceFrame">
+              <option value="laboratory" selected>Laboratory view</option>
+              <option value="rotating">Rotating view</option>
+            </select>
+          </label>
+          <label class="control">
             <span>Flip angle <output id="flipValue">90 deg</output></span>
             <input id="flipAngle" type="range" min="0" max="120" step="1" value="90" />
           </label>
@@ -61,8 +68,14 @@
             <input id="echoTime" type="range" min="0.08" max="0.5" step="0.01" value="0.16" />
           </label>
           <label class="control">
-            <span>B0 visual precession <output id="b0Value">0.85 Hz</output></span>
-            <input id="b0Rate" type="range" min="0.1" max="2.2" step="0.05" value="0.85" />
+            <span>B0 field <output id="b0Value">1.50 T</output></span>
+            <input id="b0Rate" type="range" min="0.05" max="7" step="0.05" value="1.5" />
+            <div class="control-readout">
+              <span>Proton Larmor</span>
+              <strong id="larmorValue">63.87 MHz</strong>
+              <span>Period</span>
+              <strong id="larmorPeriodValue">15.66 ns</strong>
+            </div>
           </label>
           <label class="control">
             <span>Off-resonance spread <output id="offValue">0.45 Hz</output></span>
@@ -185,8 +198,8 @@
           </div>
           <div class="loop-readouts">
             <span>Start <strong id="loopStartReadout">0 ms</strong></span>
-            <span>End <strong id="loopEndReadout">450 ms</strong></span>
-            <span>Zoom <strong id="zoomReadout">6.7x</strong></span>
+            <span>End <strong id="loopEndReadout">80 ms</strong></span>
+            <span>Zoom <strong id="zoomReadout">37.5x</strong></span>
           </div>
         </div>
         <div class="chart-panel">

@@ -10,6 +10,7 @@ const controlsUi = {
   resetTime: document.querySelector('#resetTime'),
   resetCamera: document.querySelector('#resetCamera'),
   sequenceType: document.querySelector('#sequenceType'),
+  referenceFrame: document.querySelector('#referenceFrame'),
   flipAngle: document.querySelector('#flipAngle'),
   refocusAngle: document.querySelector('#refocusAngle'),
   echoTime: document.querySelector('#echoTime'),
@@ -54,6 +55,8 @@ const outputs = {
   phaseLabelC: document.querySelector('#phaseLabelC'),
   chartMz: document.querySelector('#chartMzReadout'),
   mzChart: document.querySelector('#mzChart'),
+  larmor: document.querySelector('#larmorValue'),
+  larmorPeriod: document.querySelector('#larmorPeriodValue'),
   loopSelection: document.querySelector('#loopSelection'),
   loopStart: document.querySelector('#loopStartReadout'),
   loopEnd: document.querySelector('#loopEndReadout'),
@@ -65,21 +68,21 @@ const state = {
   playing: true,
   elapsed: 0,
   cycleSeconds: 3,
-  rfSeconds: 0.12,
+  referenceFrame: 'laboratory',
   flipAngle: 90,
   refocusAngle: 180,
   echoTime: 0.16,
-  b0Rate: 0.85,
+  b0Tesla: 1.5,
   offRes: 0.45,
   tissuePreset: 'grayMatter',
   t1Ms: 1300,
   t2Ms: 100,
-  speed: 1,
+  speed: 1e-9,
   density: 12,
   vectorStyle: 'classic',
   phantomType: 'shepp-logan',
   loopStart: 0,
-  loopEnd: 0.45,
+  loopEnd: 0.08,
 };
 
 const scene = new THREE.Scene();
@@ -134,6 +137,12 @@ const dir = new THREE.Vector3();
 const scale = new THREE.Vector3();
 const netDirection = new THREE.Vector3(0, 1, 0);
 const coilMaterials = [];
+const TAU = Math.PI * 2;
+const PROTON_GYROMAGNETIC_RATIO_MHZ_T = 42.57747892;
+const RF_90_SECONDS = 0.003;
+const RF_EPSILON_SECONDS = 0.0001;
+const SPEED_SLIDER_MIN = -9;
+const SPEED_SLIDER_MAX = 0.5;
 
 const netArrow = new THREE.ArrowHelper(netDirection, new THREE.Vector3(0, 0, 0), 0.9, 0xf3b846, 0.17, 0.08);
 netArrow.line.material.linewidth = 3;
@@ -207,7 +216,7 @@ function updateMoments(sequence = getSequenceConfig()) {
   netArrow.setLength(1.05 * netLength, 0.18, 0.09);
   netArrow.visible = controlsUi.showNet.checked;
 
-  outputs.time.textContent = `${localTime.toFixed(2)} s`;
+  outputs.time.textContent = formatSimulationTime(localTime);
   outputs.mxy.textContent = mxy.toFixed(2);
   outputs.mz.textContent = normMz.toFixed(2);
   outputs.chartMz.textContent = normMz.toFixed(2);
@@ -219,12 +228,23 @@ function updateMoments(sequence = getSequenceConfig()) {
     ready: true,
     samples: samples.length,
     sequence: state.sequence,
+    referenceFrame: state.referenceFrame,
     phantomType: state.phantomType,
     tissuePreset: state.tissuePreset,
     t1Ms: state.t1Ms,
     t2Ms: state.t2Ms,
     localTime,
     cycleSeconds: sequence.cycleSeconds,
+    rf90Seconds: sequence.rf90Seconds,
+    refocusSeconds: sequence.refocusSeconds || 0,
+    refocusCenter: sequence.refocusCenter || null,
+    echoTime: sequence.echoTime || null,
+    b0Tesla: state.b0Tesla,
+    larmorHz: larmorFrequencyHz(),
+    larmorPeriodSeconds: larmorPeriodSeconds(),
+    displayedMainFieldCycles: displayedMainFieldCycles(localTime),
+    speed: state.speed,
+    speedSlider: Number(controlsUi.speed.value),
     loopStart: loop.start,
     loopEnd: loop.end,
     loopSpan: loop.end - loop.start,
@@ -235,8 +255,8 @@ function updateMoments(sequence = getSequenceConfig()) {
 
 function getSequenceConfig() {
   if (state.sequence === 'spin-echo') {
-    const rf90Seconds = 0.06;
-    const refocusSeconds = 0.045;
+    const rf90Seconds = rfPulseSecondsForAngle(state.flipAngle);
+    const refocusSeconds = rfPulseSecondsForAngle(state.refocusAngle);
     const echoTime = state.echoTime;
     const refocusCenter = echoTime / 2;
     const readoutSeconds = 0.07;
@@ -259,21 +279,37 @@ function getSequenceConfig() {
     type: 'single-pulse',
     name: 'Single RF pulse',
     cycleSeconds: 3,
-    rf90Seconds: state.rfSeconds,
+    rf90Seconds: rfPulseSecondsForAngle(state.flipAngle),
   };
+}
+
+function rfPulseSecondsForAngle(angleDegrees) {
+  return RF_90_SECONDS * Math.max(0, angleDegrees) / 90;
+}
+
+function larmorFrequencyHz() {
+  return PROTON_GYROMAGNETIC_RATIO_MHZ_T * 1_000_000 * state.b0Tesla;
+}
+
+function larmorPeriodSeconds() {
+  return 1 / larmorFrequencyHz();
+}
+
+function displayedMainFieldCycles(localTime) {
+  return state.referenceFrame === 'laboratory' ? larmorFrequencyHz() * localTime : 0;
 }
 
 function defaultLoopRange(sequence) {
   if (sequence.type === 'spin-echo') {
     return {
       start: 0,
-      end: clamp(Math.max(0.42, sequence.echoTime + 0.2), 0.18, sequence.cycleSeconds),
+      end: clamp(sequence.echoTime + 0.08, 0.14, sequence.cycleSeconds),
     };
   }
 
   return {
     start: 0,
-    end: Math.min(0.45, sequence.cycleSeconds),
+    end: Math.min(Math.max(0.08, sequence.rf90Seconds * 24), sequence.cycleSeconds),
   };
 }
 
@@ -325,11 +361,13 @@ function getMomentAt(sample, localTime, sequence) {
 }
 
 function getSinglePulseMoment(sample, localTime, sequence) {
-  const pulseProgress = clamp(localTime / sequence.rf90Seconds, 0, 1);
+  const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
+  const pulseProgress = clamp(localTime / rfSeconds, 0, 1);
   const rfEase = smoothstep(pulseProgress);
   const flip = degToRad(state.flipAngle);
   const freeTime = Math.max(0, localTime - sequence.rf90Seconds);
-  const theta = localTime < sequence.rf90Seconds ? flip * rfEase : flip;
+  const inPulse = localTime < sequence.rf90Seconds;
+  const theta = inPulse ? flip * rfEase : flip;
   const transverseStart = Math.sin(theta);
   const mzDuringPulse = Math.cos(theta);
   const postPulseMz = Math.cos(flip);
@@ -337,11 +375,11 @@ function getSinglePulseMoment(sample, localTime, sequence) {
   const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
   const t2Decay = Math.exp(-freeTime / localT2);
   const transverse = transverseStart * t2Decay;
-  const mz = localTime < sequence.rf90Seconds
+  const mz = inPulse
     ? mzDuringPulse
     : recoverMz(postPulseMz, freeTime, localT1);
-  const phase = sample.phaseOffset + Math.PI * 2 * state.b0Rate * localTime
-    + Math.PI * 2 * state.offRes * sample.offResBase * freeTime;
+  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * freeTime;
+  const phase = sample.phaseOffset + TAU * positiveModulo(phaseCycles, 1);
 
   return {
     mx: transverse * Math.cos(phase),
@@ -356,6 +394,8 @@ function getSpinEchoMoment(sample, localTime, sequence) {
   const refocus = degToRad(state.refocusAngle);
   const t1Seconds = (state.t1Ms / 1000) * sample.t1Scale;
   const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
+  const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
+  const refocusSeconds = Math.max(sequence.refocusSeconds, RF_EPSILON_SECONDS);
   const timeSinceExcitation = Math.max(0, localTime - sequence.rf90Seconds);
   const transverseBase = Math.sin(flip);
   const t2Decay = Math.exp(-timeSinceExcitation / localT2);
@@ -364,7 +404,7 @@ function getSpinEchoMoment(sample, localTime, sequence) {
   let mz;
 
   if (localTime < sequence.rf90Seconds) {
-    const theta = flip * smoothstep(clamp(localTime / sequence.rf90Seconds, 0, 1));
+    const theta = flip * smoothstep(clamp(localTime / rfSeconds, 0, 1));
     transverse = Math.sin(theta);
     mz = Math.cos(theta);
     phaseSpreadTime = 0;
@@ -373,7 +413,7 @@ function getSpinEchoMoment(sample, localTime, sequence) {
   } else if (localTime <= sequence.refocusEnd) {
     const mzBeforeRefocus = recoverMz(Math.cos(flip), sequence.refocusStart - sequence.rf90Seconds, t1Seconds);
     const mzAfterRefocus = mzBeforeRefocus * Math.cos(refocus);
-    const refocusProgress = smoothstep(clamp((localTime - sequence.refocusStart) / sequence.refocusSeconds, 0, 1));
+    const refocusProgress = smoothstep(clamp((localTime - sequence.refocusStart) / refocusSeconds, 0, 1));
     mz = lerp(mzBeforeRefocus, mzAfterRefocus, refocusProgress);
     transverse *= lerp(1, refocusEfficiency(refocus), refocusProgress);
     phaseSpreadTime = sequence.refocusStart - sequence.rf90Seconds;
@@ -385,8 +425,8 @@ function getSpinEchoMoment(sample, localTime, sequence) {
     phaseSpreadTime = Math.max(0, sequence.echoTime - localTime);
   }
 
-  const phase = Math.PI * 2 * state.b0Rate * localTime
-    + Math.PI * 2 * state.offRes * sample.offResBase * phaseSpreadTime;
+  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * phaseSpreadTime;
+  const phase = TAU * positiveModulo(phaseCycles, 1);
 
   return {
     mx: transverse * Math.cos(phase),
@@ -710,6 +750,7 @@ function applySequenceSettings() {
   const loop = normalizeLoopRange(sequence);
   state.elapsed = clamp(state.elapsed, loop.start, loop.end);
   controlsUi.sequenceType.value = state.sequence;
+  controlsUi.referenceFrame.value = state.referenceFrame;
   outputs.te.textContent = formatMs(state.echoTime * 1000);
 
   document.querySelectorAll('.spin-echo-only').forEach((element) => {
@@ -723,7 +764,9 @@ function applySequenceSettings() {
     outputs.phaseLabelC.textContent = 'Readout';
   } else {
     outputs.phaseLabelA.textContent = 'RF pulse';
-    outputs.phaseLabelB.textContent = 'Free precession under B0';
+    outputs.phaseLabelB.textContent = state.referenceFrame === 'laboratory'
+      ? 'Larmor precession under B0'
+      : 'Rotating-frame off-resonance';
     outputs.phaseLabelC.textContent = 'Cycle reset';
   }
 
@@ -747,6 +790,12 @@ function applyTissuePreset(presetKey) {
 function updateRelaxationOutputs() {
   outputs.t1.textContent = formatMs(state.t1Ms);
   outputs.t2.textContent = formatMs(state.t2Ms);
+}
+
+function updateFieldOutputs() {
+  outputs.b0.textContent = `${state.b0Tesla.toFixed(2)} T`;
+  outputs.larmor.textContent = formatFrequency(larmorFrequencyHz());
+  outputs.larmorPeriod.textContent = formatSimulationTime(larmorPeriodSeconds());
 }
 
 function renderTimeline(sequence) {
@@ -963,16 +1012,21 @@ function bindUi() {
     applySequenceSettings();
   });
 
+  controlsUi.referenceFrame.addEventListener('change', () => {
+    state.referenceFrame = controlsUi.referenceFrame.value;
+    applySequenceSettings();
+  });
+
   controlsUi.flipAngle.addEventListener('input', () => {
     state.flipAngle = Number(controlsUi.flipAngle.value);
     outputs.flip.textContent = `${state.flipAngle} deg`;
-    updateMoments();
+    applySequenceSettings();
   });
 
   controlsUi.refocusAngle.addEventListener('input', () => {
     state.refocusAngle = Number(controlsUi.refocusAngle.value);
     outputs.refocus.textContent = `${state.refocusAngle} deg`;
-    updateMoments();
+    applySequenceSettings();
   });
 
   controlsUi.echoTime.addEventListener('input', () => {
@@ -983,8 +1037,8 @@ function bindUi() {
   });
 
   controlsUi.b0Rate.addEventListener('input', () => {
-    state.b0Rate = Number(controlsUi.b0Rate.value);
-    outputs.b0.textContent = `${state.b0Rate.toFixed(2)} Hz`;
+    state.b0Tesla = Number(controlsUi.b0Rate.value);
+    updateFieldOutputs();
     updateMoments();
   });
 
@@ -1016,8 +1070,9 @@ function bindUi() {
   });
 
   controlsUi.speed.addEventListener('input', () => {
-    state.speed = Number(controlsUi.speed.value);
-    outputs.speed.textContent = `${state.speed.toFixed(1)}x`;
+    state.speed = speedFromSlider(Number(controlsUi.speed.value));
+    outputs.speed.textContent = formatSpeed(state.speed);
+    updateMoments();
   });
 
   controlsUi.density.addEventListener('input', () => {
@@ -1208,6 +1263,46 @@ function formatTimeCompact(seconds) {
   return `${seconds.toFixed(2)} s`;
 }
 
+function formatSimulationTime(seconds) {
+  if (seconds < 1e-6) {
+    return `${(seconds * 1e9).toFixed(2)} ns`;
+  }
+  if (seconds < 1e-3) {
+    return `${(seconds * 1e6).toFixed(2)} us`;
+  }
+  if (seconds < 1) {
+    return `${(seconds * 1e3).toFixed(2)} ms`;
+  }
+  return `${seconds.toFixed(2)} s`;
+}
+
+function formatFrequency(hz) {
+  if (hz >= 1e6) {
+    return `${(hz / 1e6).toFixed(2)} MHz`;
+  }
+  if (hz >= 1e3) {
+    return `${(hz / 1e3).toFixed(2)} kHz`;
+  }
+  return `${hz.toFixed(2)} Hz`;
+}
+
+function speedFromSlider(sliderValue) {
+  return 10 ** clamp(sliderValue, SPEED_SLIDER_MIN, SPEED_SLIDER_MAX);
+}
+
+function formatSpeed(speed) {
+  if (speed < 0.001) {
+    return `${speed.toExponential(1).replace('.0', '')}x`;
+  }
+  if (speed < 0.1) {
+    return `${speed.toFixed(2)}x`;
+  }
+  if (speed < 1) {
+    return `${speed.toFixed(1)}x`;
+  }
+  return `${speed.toFixed(1)}x`;
+}
+
 function positiveModulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
 }
@@ -1255,5 +1350,6 @@ rebuildPhantom();
 bindUi();
 resize();
 updateRelaxationOutputs();
+updateFieldOutputs();
 applySequenceSettings();
 requestAnimationFrame(animate);
