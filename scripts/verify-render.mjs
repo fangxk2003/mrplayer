@@ -43,6 +43,8 @@ for (const check of checks) {
   });
   await navigateAndWait(cdp, targetUrl);
   await waitForRender(cdp);
+  await delay(500);
+  await waitForRender(cdp);
 
   const stats = await evaluate(cdp, `(() => {
     const canvas = document.querySelector('#scene canvas');
@@ -93,7 +95,170 @@ for (const check of checks) {
 
   const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true });
   await fs.writeFile(`${check.name}-demo.png`, Buffer.from(screenshot.data, 'base64'));
-  results.push({ ...check, stats });
+  const styleResults = await evaluate(cdp, `new Promise((resolve) => {
+    const styles = ['classic', 'needle', 'cone', 'phase'];
+    const select = document.querySelector('#vectorStyle');
+    const results = [];
+    let index = 0;
+
+    function next() {
+      if (!select || index >= styles.length) {
+        resolve(results);
+        return;
+      }
+
+      const style = styles[index];
+      index += 1;
+      select.value = style;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          results.push({
+            style,
+            value: select.value,
+            samples: window.__mrDemoStats?.samples || 0,
+            errors: [...(window.__mrDemoErrors || [])],
+          });
+          next();
+        });
+      });
+    }
+
+    next();
+  })`);
+  const sequenceResults = await evaluate(cdp, `new Promise((resolve) => {
+    const sequences = ['single-pulse', 'spin-echo'];
+    const select = document.querySelector('#sequenceType');
+    const results = [];
+    let index = 0;
+
+    function chartStats() {
+      const canvas = document.querySelector('#mzChart');
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) {
+        return { ok: false };
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      const data = ctx.getImageData(0, 0, width, height).data;
+      let bright = 0;
+      for (let i = 0; i < data.length; i += 16) {
+        if (Math.max(data[i], data[i + 1], data[i + 2]) > 34) {
+          bright += 1;
+        }
+      }
+      return { ok: true, width, height, bright };
+    }
+
+    function next() {
+      if (!select || index >= sequences.length) {
+        resolve(results);
+        return;
+      }
+
+      const sequence = sequences[index];
+      index += 1;
+      select.value = sequence;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          results.push({
+            sequence,
+            value: select.value,
+            appSequence: window.__mrDemoStats?.sequence,
+            samples: window.__mrDemoStats?.samples || 0,
+            spinEchoControlsHidden: [...document.querySelectorAll('.spin-echo-only')].every((item) => item.hidden),
+            eventZones: document.querySelectorAll('.event-zone').length,
+            eventMarkers: document.querySelectorAll('.event-marker').length,
+            coilToggle: Boolean(document.querySelector('#showCoil')?.checked),
+            chart: chartStats(),
+            errors: [...(window.__mrDemoErrors || [])],
+          });
+          next();
+        });
+      });
+    }
+
+    next();
+  })`);
+  const tissueResults = await evaluate(cdp, `new Promise((resolve) => {
+    const presets = [
+      { key: 'whiteMatter', t1: '850', t2: '80' },
+      { key: 'grayMatter', t1: '1300', t2: '100' },
+      { key: 'csf', t1: '4000', t2: '2000' },
+      { key: 'fat', t1: '250', t2: '70' },
+      { key: 'muscle', t1: '900', t2: '50' },
+    ];
+    const select = document.querySelector('#tissuePreset');
+    const t1 = document.querySelector('#t1');
+    const t2 = document.querySelector('#t2');
+    const results = [];
+    let index = 0;
+
+    function next() {
+      if (!select || !t1 || !t2 || index >= presets.length) {
+        resolve(results);
+        return;
+      }
+
+      const preset = presets[index];
+      index += 1;
+      select.value = preset.key;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      requestAnimationFrame(() => {
+        results.push({
+          preset: preset.key,
+          value: select.value,
+          t1: t1.value,
+          t2: t2.value,
+          expectedT1: preset.t1,
+          expectedT2: preset.t2,
+          appPreset: window.__mrDemoStats?.tissuePreset,
+          appT1: String(window.__mrDemoStats?.t1Ms),
+          appT2: String(window.__mrDemoStats?.t2Ms),
+          errors: [...(window.__mrDemoErrors || [])],
+        });
+        next();
+      });
+    }
+
+    next();
+  })`);
+  const phantomResults = await evaluate(cdp, `new Promise((resolve) => {
+    const phantoms = ['shepp-logan', 'ellipsoid'];
+    const select = document.querySelector('#phantomType');
+    const results = [];
+    let index = 0;
+
+    function next() {
+      if (!select || index >= phantoms.length) {
+        resolve(results);
+        return;
+      }
+
+      const phantom = phantoms[index];
+      index += 1;
+      select.value = phantom;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          results.push({
+            phantom,
+            value: select.value,
+            appPhantom: window.__mrDemoStats?.phantomType,
+            samples: window.__mrDemoStats?.samples || 0,
+            readout: document.querySelector('#sampleReadout')?.textContent || '',
+            errors: [...(window.__mrDemoErrors || [])],
+          });
+          next();
+        });
+      });
+    }
+
+    next();
+  })`);
+  results.push({ ...check, stats, styleResults, sequenceResults, tissueResults, phantomResults });
 }
 
 await cdp.send('Page.close').catch(() => {});
@@ -107,7 +272,43 @@ const failed = results.filter((result) => {
     || !stats.appStats?.ready
     || stats.appStats.samples <= 0
     || stats.brightRatio < 0.01
-    || stats.coloredRatio < 0.005;
+    || stats.coloredRatio < 0.005
+    || result.styleResults.some((style) => (
+      style.value !== style.style
+      || style.samples <= 0
+      || style.errors.length > 0
+    ))
+    || result.sequenceResults.some((sequence) => (
+      sequence.value !== sequence.sequence
+      || sequence.appSequence !== sequence.sequence
+      || sequence.samples <= 0
+      || sequence.errors.length > 0
+      || !sequence.coilToggle
+      || !sequence.chart.ok
+      || sequence.chart.bright <= 0
+      || (sequence.sequence === 'single-pulse' && !sequence.spinEchoControlsHidden)
+      || (sequence.sequence === 'spin-echo' && (
+        sequence.spinEchoControlsHidden
+        || sequence.eventZones < 3
+        || sequence.eventMarkers < 1
+      ))
+    ))
+    || result.tissueResults.some((preset) => (
+      preset.value !== preset.preset
+      || preset.t1 !== preset.expectedT1
+      || preset.t2 !== preset.expectedT2
+      || preset.appPreset !== preset.preset
+      || preset.appT1 !== preset.expectedT1
+      || preset.appT2 !== preset.expectedT2
+      || preset.errors.length > 0
+    ))
+    || result.phantomResults.some((phantom) => (
+      phantom.value !== phantom.phantom
+      || phantom.appPhantom !== phantom.phantom
+      || phantom.samples <= 0
+      || Number(phantom.readout) <= 0
+      || phantom.errors.length > 0
+    ));
 });
 
 console.log(JSON.stringify({ results, events }, null, 2));

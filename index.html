@@ -39,11 +39,26 @@
 
         <section class="control-section" aria-labelledby="sequence-title">
           <div class="section-heading">
-            <h2 id="sequence-title">Excitation</h2>
+            <h2 id="sequence-title">Sequence</h2>
           </div>
+          <label class="control">
+            <span>Sequence type</span>
+            <select id="sequenceType">
+              <option value="single-pulse" selected>Single RF pulse</option>
+              <option value="spin-echo">Spin Echo</option>
+            </select>
+          </label>
           <label class="control">
             <span>Flip angle <output id="flipValue">90 deg</output></span>
             <input id="flipAngle" type="range" min="0" max="120" step="1" value="90" />
+          </label>
+          <label class="control spin-echo-only" hidden>
+            <span>Refocusing angle <output id="refocusValue">180 deg</output></span>
+            <input id="refocusAngle" type="range" min="120" max="210" step="1" value="180" />
+          </label>
+          <label class="control spin-echo-only" hidden>
+            <span>Echo time <output id="teValue">160 ms</output></span>
+            <input id="echoTime" type="range" min="0.08" max="0.5" step="0.01" value="0.16" />
           </label>
           <label class="control">
             <span>B0 visual precession <output id="b0Value">0.85 Hz</output></span>
@@ -53,9 +68,30 @@
             <span>Off-resonance spread <output id="offValue">0.45 Hz</output></span>
             <input id="offRes" type="range" min="0" max="1.2" step="0.05" value="0.45" />
           </label>
+        </section>
+
+        <section class="control-section" aria-labelledby="tissue-title">
+          <div class="section-heading">
+            <h2 id="tissue-title">Tissue</h2>
+          </div>
           <label class="control">
-            <span>T2 decay <output id="t2Value">1600 ms</output></span>
-            <input id="t2" type="range" min="300" max="3000" step="50" value="1600" />
+            <span>Tissue preset</span>
+            <select id="tissuePreset">
+              <option value="grayMatter" selected>Gray matter</option>
+              <option value="whiteMatter">White matter</option>
+              <option value="csf">CSF / fluid</option>
+              <option value="fat">Fat</option>
+              <option value="muscle">Muscle</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>T1 recovery <output id="t1Value">1300 ms</output></span>
+            <input id="t1" type="range" min="200" max="5000" step="50" value="1300" />
+          </label>
+          <label class="control">
+            <span>T2 decay <output id="t2Value">100 ms</output></span>
+            <input id="t2" type="range" min="40" max="2200" step="10" value="100" />
           </label>
         </section>
 
@@ -63,6 +99,22 @@
           <div class="section-heading">
             <h2 id="view-title">View</h2>
           </div>
+          <label class="control">
+            <span>Phantom model</span>
+            <select id="phantomType">
+              <option value="shepp-logan" selected>Shepp-Logan phantom</option>
+              <option value="ellipsoid">Homogeneous ellipsoid</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>Vector style</span>
+            <select id="vectorStyle">
+              <option value="classic" selected>Classic arrows</option>
+              <option value="needle">Slim needles</option>
+              <option value="cone">Cone glyphs</option>
+              <option value="phase">Phase disks</option>
+            </select>
+          </label>
           <label class="control">
             <span>Vector density <output id="densityValue">12</output></span>
             <input id="density" type="range" min="7" max="16" step="1" value="12" />
@@ -82,6 +134,10 @@
           <label class="check-row">
             <input id="showField" type="checkbox" checked />
             <span>B0 field</span>
+          </label>
+          <label class="check-row">
+            <input id="showCoil" type="checkbox" checked />
+            <span>RF / receive coil</span>
           </label>
         </section>
       </aside>
@@ -108,15 +164,24 @@
         </div>
       </main>
 
-      <section class="timeline" aria-label="Sequence timing">
-        <div class="timeline-labels">
-          <span>RF pulse</span>
-          <span>Free precession under B0</span>
-          <span>Cycle reset</span>
+      <section class="timeline" aria-label="Sequence timing and Mz signal">
+        <div class="timeline-topline">
+          <div class="timeline-labels">
+            <span id="phaseLabelA">RF pulse</span>
+            <span id="phaseLabelB">Free precession under B0</span>
+            <span id="phaseLabelC">Cycle reset</span>
+          </div>
+          <strong id="sequenceReadout">Single RF pulse</strong>
         </div>
-        <div class="track" aria-hidden="true">
-          <div class="rf-zone"></div>
+        <div id="eventTrack" class="track" aria-hidden="true">
           <div id="timeCursor" class="cursor"></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-title">
+            <span>Mz over time</span>
+            <strong id="chartMzReadout">1.00</strong>
+          </div>
+          <canvas id="mzChart" width="900" height="120" aria-label="Mz over time chart"></canvas>
         </div>
       </section>
     </div>
