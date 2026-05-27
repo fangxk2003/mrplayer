@@ -22,6 +22,9 @@ const controlsUi = {
   density: document.querySelector('#density'),
   vectorStyle: document.querySelector('#vectorStyle'),
   phantomType: document.querySelector('#phantomType'),
+  loopStrip: document.querySelector('#loopStrip'),
+  loopStartHandle: document.querySelector('#loopStartHandle'),
+  loopEndHandle: document.querySelector('#loopEndHandle'),
   showPhantom: document.querySelector('#showPhantom'),
   showVectors: document.querySelector('#showVectors'),
   showNet: document.querySelector('#showNet'),
@@ -51,6 +54,10 @@ const outputs = {
   phaseLabelC: document.querySelector('#phaseLabelC'),
   chartMz: document.querySelector('#chartMzReadout'),
   mzChart: document.querySelector('#mzChart'),
+  loopSelection: document.querySelector('#loopSelection'),
+  loopStart: document.querySelector('#loopStartReadout'),
+  loopEnd: document.querySelector('#loopEndReadout'),
+  zoom: document.querySelector('#zoomReadout'),
 };
 
 const state = {
@@ -71,6 +78,8 @@ const state = {
   density: 12,
   vectorStyle: 'classic',
   phantomType: 'shepp-logan',
+  loopStart: 0,
+  loopEnd: 0.45,
 };
 
 const scene = new THREE.Scene();
@@ -123,7 +132,6 @@ const quat = new THREE.Quaternion();
 const yAxis = new THREE.Vector3(0, 1, 0);
 const dir = new THREE.Vector3();
 const scale = new THREE.Vector3();
-const color = new THREE.Color();
 const netDirection = new THREE.Vector3(0, 1, 0);
 const coilMaterials = [];
 
@@ -136,24 +144,28 @@ let lastTime = performance.now();
 function animate(now) {
   const dt = clamp((now - lastTime) / 1000, 0, 0.05);
   lastTime = now;
+  const sequence = getSequenceConfig();
+  const loop = normalizeLoopRange(sequence);
 
   if (state.playing) {
-    state.elapsed += dt * state.speed;
+    state.elapsed = advanceLoopTime(state.elapsed, dt * state.speed, loop);
+  } else {
+    state.elapsed = clamp(state.elapsed, loop.start, loop.end);
   }
 
-  updateMoments();
+  updateMoments(sequence);
   orbit.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
 
-function updateMoments() {
+function updateMoments(sequence = getSequenceConfig()) {
   if (!arrowMesh || samples.length === 0) {
     return;
   }
 
-  const sequence = getSequenceConfig();
-  const localTime = positiveModulo(state.elapsed, state.cycleSeconds);
+  const loop = normalizeLoopRange(sequence);
+  const localTime = clamp(state.elapsed, loop.start, loop.end);
 
   let sumMx = 0;
   let sumMy = 0;
@@ -177,10 +189,6 @@ function updateMoments() {
     matrix.compose(sample.position, quat, scale);
     arrowMesh.setMatrixAt(i, matrix);
 
-    const hue = positiveModulo(moment.phase / (Math.PI * 2), 1);
-    color.setHSL(hue, 0.78, 0.5 + 0.13 * sample.rho);
-    arrowMesh.setColorAt(i, color);
-
     sumMx += weightedMx;
     sumMy += weightedMy;
     sumMz += weightedMz;
@@ -188,8 +196,6 @@ function updateMoments() {
   }
 
   arrowMesh.instanceMatrix.needsUpdate = true;
-  arrowMesh.instanceColor.needsUpdate = true;
-
   const normMx = sumMx / sumRho;
   const normMy = sumMy / sumRho;
   const normMz = sumMz / sumRho;
@@ -205,9 +211,9 @@ function updateMoments() {
   outputs.mxy.textContent = mxy.toFixed(2);
   outputs.mz.textContent = normMz.toFixed(2);
   outputs.chartMz.textContent = normMz.toFixed(2);
-  outputs.cursor.style.left = `${(localTime / state.cycleSeconds) * 100}%`;
+  outputs.cursor.style.left = `${timeToWindowPercent(localTime, loop)}%`;
   updateCoil(localTime, sequence);
-  drawMzChart(localTime, sequence);
+  drawMzChart(localTime, sequence, loop);
 
   window.__mrDemoStats = {
     ready: true,
@@ -218,6 +224,10 @@ function updateMoments() {
     t1Ms: state.t1Ms,
     t2Ms: state.t2Ms,
     localTime,
+    cycleSeconds: sequence.cycleSeconds,
+    loopStart: loop.start,
+    loopEnd: loop.end,
+    loopSpan: loop.end - loop.start,
     mxy,
     mz: normMz,
   };
@@ -251,6 +261,60 @@ function getSequenceConfig() {
     cycleSeconds: 3,
     rf90Seconds: state.rfSeconds,
   };
+}
+
+function defaultLoopRange(sequence) {
+  if (sequence.type === 'spin-echo') {
+    return {
+      start: 0,
+      end: clamp(Math.max(0.42, sequence.echoTime + 0.2), 0.18, sequence.cycleSeconds),
+    };
+  }
+
+  return {
+    start: 0,
+    end: Math.min(0.45, sequence.cycleSeconds),
+  };
+}
+
+function normalizeLoopRange(sequence = getSequenceConfig()) {
+  const minSpan = getMinLoopSpan(sequence);
+  let start = Number.isFinite(state.loopStart) ? state.loopStart : 0;
+  let end = Number.isFinite(state.loopEnd) ? state.loopEnd : sequence.cycleSeconds;
+
+  start = clamp(start, 0, Math.max(0, sequence.cycleSeconds - minSpan));
+  end = clamp(end, start + minSpan, sequence.cycleSeconds);
+
+  state.loopStart = start;
+  state.loopEnd = end;
+  return { start, end, span: end - start };
+}
+
+function resetLoopRange(sequence = getSequenceConfig()) {
+  const range = defaultLoopRange(sequence);
+  state.loopStart = range.start;
+  state.loopEnd = range.end;
+  state.elapsed = range.start;
+  return normalizeLoopRange(sequence);
+}
+
+function getMinLoopSpan(sequence) {
+  return Math.min(0.08, Math.max(0.03, sequence.cycleSeconds * 0.01));
+}
+
+function advanceLoopTime(currentTime, deltaSeconds, loop) {
+  if (loop.span <= 0) {
+    return loop.start;
+  }
+
+  return loop.start + positiveModulo(currentTime - loop.start + deltaSeconds, loop.span);
+}
+
+function timeToWindowPercent(time, loop) {
+  if (loop.span <= 0) {
+    return 0;
+  }
+  return clamp(((time - loop.start) / loop.span) * 100, 0, 100);
 }
 
 function getMomentAt(sample, localTime, sequence) {
@@ -354,7 +418,7 @@ function averageMzAt(time, sequence) {
   return sumMz / sumRho;
 }
 
-function drawMzChart(localTime, sequence) {
+function drawMzChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
   const canvas = outputs.mzChart;
   const rect = canvas.getBoundingClientRect();
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -388,8 +452,8 @@ function drawMzChart(localTime, sequence) {
   }
 
   for (const event of timelineEvents(sequence)) {
-    if (event.marker) {
-      const x = pad.left + plotWidth * (event.time / sequence.cycleSeconds);
+    if (event.marker && event.time >= loop.start && event.time <= loop.end) {
+      const x = pad.left + plotWidth * ((event.time - loop.start) / loop.span);
       ctx.strokeStyle = event.color;
       ctx.globalAlpha = 0.58;
       ctx.beginPath();
@@ -405,7 +469,7 @@ function drawMzChart(localTime, sequence) {
   ctx.beginPath();
   const steps = 150;
   for (let i = 0; i <= steps; i += 1) {
-    const time = (sequence.cycleSeconds * i) / steps;
+    const time = loop.start + (loop.span * i) / steps;
     const mz = averageMzAt(time, sequence);
     const x = pad.left + (plotWidth * i) / steps;
     const y = pad.top + plotHeight * (1 - ((clamp(mz, -1, 1) + 1) / 2));
@@ -417,7 +481,7 @@ function drawMzChart(localTime, sequence) {
   }
   ctx.stroke();
 
-  const cursorX = pad.left + plotWidth * (localTime / sequence.cycleSeconds);
+  const cursorX = pad.left + plotWidth * ((localTime - loop.start) / loop.span);
   ctx.strokeStyle = '#84d1c5';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -430,6 +494,12 @@ function drawMzChart(localTime, sequence) {
   ctx.fillText('1', 8, pad.top + 4);
   ctx.fillText('0', 8, pad.top + plotHeight / 2 + 4);
   ctx.fillText('-1', 6, pad.top + plotHeight + 2);
+  ctx.fillStyle = 'rgba(228, 235, 229, 0.68)';
+  ctx.font = '700 10px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(formatTimeCompact(loop.start), pad.left, viewHeight - 3);
+  ctx.textAlign = 'right';
+  ctx.fillText(formatTimeCompact(loop.end), viewWidth - pad.right, viewHeight - 3);
   ctx.restore();
 }
 
@@ -484,10 +554,11 @@ function rebuildPhantom() {
   pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   const pointMaterial = new THREE.PointsMaterial({
-    size: 0.035,
+    size: 0.024,
     vertexColors: true,
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.16,
+    blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
   phantomPoints = new THREE.Points(pointGeometry, pointMaterial);
@@ -503,15 +574,17 @@ function rebuildPhantom() {
 
 function createVectorMesh() {
   const arrowMaterial = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.5,
-    metalness: 0.1,
-    side: THREE.DoubleSide,
-    vertexColors: true,
+    color: 0x28f7ff,
+    emissive: 0x0f7f8e,
+    emissiveIntensity: 0.55,
+    roughness: 0.36,
+    metalness: 0.08,
+    toneMapped: false,
   });
   arrowMesh = new THREE.InstancedMesh(createArrowGeometry(state.vectorStyle), arrowMaterial, samples.length);
   arrowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   arrowMesh.frustumCulled = false;
+  arrowMesh.renderOrder = 8;
   vectorGroup.add(arrowMesh);
 }
 
@@ -634,7 +707,8 @@ function updateCoil(localTime, sequence) {
 function applySequenceSettings() {
   const sequence = getSequenceConfig();
   state.cycleSeconds = sequence.cycleSeconds;
-  state.elapsed = positiveModulo(state.elapsed, state.cycleSeconds);
+  const loop = normalizeLoopRange(sequence);
+  state.elapsed = clamp(state.elapsed, loop.start, loop.end);
   controlsUi.sequenceType.value = state.sequence;
   outputs.te.textContent = formatMs(state.echoTime * 1000);
 
@@ -654,7 +728,7 @@ function applySequenceSettings() {
   }
 
   renderTimeline(sequence);
-  updateMoments();
+  updateMoments(sequence);
 }
 
 function applyTissuePreset(presetKey) {
@@ -680,24 +754,72 @@ function renderTimeline(sequence) {
     element.remove();
   });
 
+  const loop = normalizeLoopRange(sequence);
   for (const event of timelineEvents(sequence)) {
     if (event.marker) {
+      if (event.time < loop.start || event.time > loop.end) {
+        continue;
+      }
+
       const marker = document.createElement('div');
       marker.className = 'event-marker';
-      marker.style.left = `${(event.time / sequence.cycleSeconds) * 100}%`;
+      marker.style.left = `${timeToWindowPercent(event.time, loop)}%`;
       marker.style.background = event.color;
       marker.title = event.label;
       outputs.eventTrack.insertBefore(marker, outputs.cursor);
       continue;
     }
 
+    const clippedStart = Math.max(event.start, loop.start);
+    const clippedEnd = Math.min(event.end, loop.end);
+    if (clippedEnd <= clippedStart) {
+      continue;
+    }
+
     const zone = document.createElement('div');
     zone.className = `event-zone ${event.kind}`;
-    zone.style.left = `${(event.start / sequence.cycleSeconds) * 100}%`;
-    zone.style.width = `${((event.end - event.start) / sequence.cycleSeconds) * 100}%`;
+    zone.style.left = `${timeToWindowPercent(clippedStart, loop)}%`;
+    zone.style.width = `${((clippedEnd - clippedStart) / loop.span) * 100}%`;
     zone.title = event.label;
     outputs.eventTrack.insertBefore(zone, outputs.cursor);
   }
+
+  renderLoopEditor(sequence, loop);
+}
+
+function renderLoopEditor(sequence, loop = normalizeLoopRange(sequence)) {
+  controlsUi.loopStrip.querySelectorAll('.loop-zone, .loop-marker').forEach((element) => {
+    element.remove();
+  });
+
+  for (const event of timelineEvents(sequence)) {
+    if (event.marker) {
+      const marker = document.createElement('div');
+      marker.className = 'loop-marker';
+      marker.style.left = `${(event.time / sequence.cycleSeconds) * 100}%`;
+      marker.style.background = event.color;
+      marker.title = event.label;
+      controlsUi.loopStrip.insertBefore(marker, outputs.loopSelection);
+      continue;
+    }
+
+    const zone = document.createElement('div');
+    zone.className = `loop-zone ${event.kind}`;
+    zone.style.left = `${(event.start / sequence.cycleSeconds) * 100}%`;
+    zone.style.width = `${((event.end - event.start) / sequence.cycleSeconds) * 100}%`;
+    zone.title = event.label;
+    controlsUi.loopStrip.insertBefore(zone, outputs.loopSelection);
+  }
+
+  outputs.loopSelection.style.left = `${(loop.start / sequence.cycleSeconds) * 100}%`;
+  outputs.loopSelection.style.width = `${(loop.span / sequence.cycleSeconds) * 100}%`;
+  updateLoopReadouts(sequence, loop);
+}
+
+function updateLoopReadouts(sequence, loop = normalizeLoopRange(sequence)) {
+  outputs.loopStart.textContent = formatTimeCompact(loop.start);
+  outputs.loopEnd.textContent = formatTimeCompact(loop.end);
+  outputs.zoom.textContent = `${(sequence.cycleSeconds / loop.span).toFixed(1)}x`;
 }
 
 function timelineEvents(sequence) {
@@ -715,6 +837,107 @@ function timelineEvents(sequence) {
   ];
 }
 
+function bindLoopControls() {
+  controlsUi.loopStartHandle.addEventListener('pointerdown', (event) => {
+    beginLoopDrag(event, 'start');
+  });
+  controlsUi.loopEndHandle.addEventListener('pointerdown', (event) => {
+    beginLoopDrag(event, 'end');
+  });
+
+  controlsUi.loopStrip.addEventListener('pointerdown', (event) => {
+    if (event.target === controlsUi.loopStartHandle || event.target === controlsUi.loopEndHandle) {
+      return;
+    }
+
+    const sequence = getSequenceConfig();
+    const pointerTime = timeFromStripPointer(event, sequence);
+    const middle = (state.loopStart + state.loopEnd) / 2;
+    beginLoopDrag(event, pointerTime < middle ? 'start' : 'end');
+  });
+
+  outputs.eventTrack.addEventListener('pointerdown', (event) => {
+    const sequence = getSequenceConfig();
+    const loop = normalizeLoopRange(sequence);
+    state.elapsed = timeFromWindowPointer(event, outputs.eventTrack, loop);
+    updateMoments(sequence);
+  });
+
+  [controlsUi.loopStartHandle, controlsUi.loopEndHandle].forEach((handle) => {
+    handle.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        return;
+      }
+
+      event.preventDefault();
+      const sequence = getSequenceConfig();
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      const step = event.shiftKey ? sequence.cycleSeconds * 0.05 : sequence.cycleSeconds * 0.01;
+      setLoopBoundary(handle === controlsUi.loopStartHandle ? 'start' : 'end', (
+        handle === controlsUi.loopStartHandle ? state.loopStart : state.loopEnd
+      ) + direction * step, sequence);
+    });
+  });
+
+  window.__mrDemoSetLoopRange = (start, end) => {
+    const sequence = getSequenceConfig();
+    state.loopStart = Number(start);
+    state.loopEnd = Number(end);
+    const loop = normalizeLoopRange(sequence);
+    state.elapsed = loop.start;
+    renderTimeline(sequence);
+    updateMoments(sequence);
+    return { start: loop.start, end: loop.end };
+  };
+}
+
+function beginLoopDrag(event, handle) {
+  event.preventDefault();
+  const sequence = getSequenceConfig();
+  const target = handle === 'start' ? controlsUi.loopStartHandle : controlsUi.loopEndHandle;
+  target.setPointerCapture?.(event.pointerId);
+  setLoopBoundary(handle, timeFromStripPointer(event, sequence), sequence);
+
+  const move = (moveEvent) => {
+    setLoopBoundary(handle, timeFromStripPointer(moveEvent, sequence), sequence);
+  };
+  const end = () => {
+    target.removeEventListener('pointermove', move);
+    target.removeEventListener('pointerup', end);
+    target.removeEventListener('pointercancel', end);
+  };
+
+  target.addEventListener('pointermove', move);
+  target.addEventListener('pointerup', end, { once: true });
+  target.addEventListener('pointercancel', end, { once: true });
+}
+
+function setLoopBoundary(handle, time, sequence = getSequenceConfig()) {
+  const minSpan = getMinLoopSpan(sequence);
+  if (handle === 'start') {
+    state.loopStart = clamp(time, 0, state.loopEnd - minSpan);
+  } else {
+    state.loopEnd = clamp(time, state.loopStart + minSpan, sequence.cycleSeconds);
+  }
+
+  const loop = normalizeLoopRange(sequence);
+  state.elapsed = clamp(state.elapsed, loop.start, loop.end);
+  renderTimeline(sequence);
+  updateMoments(sequence);
+}
+
+function timeFromStripPointer(event, sequence) {
+  const rect = controlsUi.loopStrip.getBoundingClientRect();
+  const amount = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  return amount * sequence.cycleSeconds;
+}
+
+function timeFromWindowPointer(event, element, loop) {
+  const rect = element.getBoundingClientRect();
+  const amount = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  return loop.start + amount * loop.span;
+}
+
 function bindUi() {
   controlsUi.playPause.addEventListener('click', () => {
     state.playing = !state.playing;
@@ -724,7 +947,7 @@ function bindUi() {
   });
 
   controlsUi.resetTime.addEventListener('click', () => {
-    state.elapsed = 0;
+    state.elapsed = normalizeLoopRange(getSequenceConfig()).start;
     updateMoments();
   });
 
@@ -736,7 +959,7 @@ function bindUi() {
 
   controlsUi.sequenceType.addEventListener('change', () => {
     state.sequence = controlsUi.sequenceType.value;
-    state.elapsed = 0;
+    resetLoopRange(getSequenceConfig());
     applySequenceSettings();
   });
 
@@ -755,6 +978,7 @@ function bindUi() {
   controlsUi.echoTime.addEventListener('input', () => {
     state.echoTime = Number(controlsUi.echoTime.value);
     outputs.te.textContent = formatMs(state.echoTime * 1000);
+    resetLoopRange(getSequenceConfig());
     applySequenceSettings();
   });
 
@@ -822,6 +1046,7 @@ function bindUi() {
     input.addEventListener('change', updateVisibility);
   });
 
+  bindLoopControls();
   window.addEventListener('resize', resize);
 }
 
@@ -921,15 +1146,15 @@ function phantomDensity(x, y, z) {
 function tissueColor(rho) {
   const c = new THREE.Color();
   if (rho < 0.18) {
-    return c.setHSL(0.55, 0.55, 0.42);
+    return c.setHSL(0.55, 0.5, 0.58);
   }
   if (rho < 0.38) {
-    return c.setHSL(0.47, 0.52, 0.46);
+    return c.setHSL(0.47, 0.5, 0.56);
   }
   if (rho < 0.68) {
-    return c.setHSL(0.09, 0.74, 0.58);
+    return c.setHSL(0.09, 0.68, 0.64);
   }
-  return c.setHSL(0.01, 0.76, 0.58);
+  return c.setHSL(0.01, 0.7, 0.66);
 }
 
 function toThreePosition(x, y, z) {
@@ -974,6 +1199,13 @@ function degToRad(degrees) {
 
 function formatMs(value) {
   return `${Math.round(value)} ms`;
+}
+
+function formatTimeCompact(seconds) {
+  if (seconds < 1) {
+    return formatMs(seconds * 1000);
+  }
+  return `${seconds.toFixed(2)} s`;
 }
 
 function positiveModulo(value, divisor) {

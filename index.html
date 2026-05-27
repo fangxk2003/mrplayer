@@ -173,8 +173,21 @@
           </div>
           <strong id="sequenceReadout">Single RF pulse</strong>
         </div>
-        <div id="eventTrack" class="track" aria-hidden="true">
+        <div id="eventTrack" class="track" aria-label="Zoomed sequence timeline">
           <div id="timeCursor" class="cursor"></div>
+        </div>
+        <div class="loop-editor" aria-label="Loop range">
+          <div id="loopStrip" class="loop-strip">
+            <div id="loopSelection" class="loop-selection">
+              <button id="loopStartHandle" class="loop-handle start" type="button" title="Loop start" aria-label="Loop start"></button>
+              <button id="loopEndHandle" class="loop-handle end" type="button" title="Loop end" aria-label="Loop end"></button>
+            </div>
+          </div>
+          <div class="loop-readouts">
+            <span>Start <strong id="loopStartReadout">0 ms</strong></span>
+            <span>End <strong id="loopEndReadout">450 ms</strong></span>
+            <span>Zoom <strong id="zoomReadout">6.7x</strong></span>
+          </div>
         </div>
         <div class="chart-panel">
           <div class="chart-title">

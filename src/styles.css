@@ -31,7 +31,7 @@ body {
 #app {
   display: grid;
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) 184px;
+  grid-template-rows: minmax(0, 1fr) 232px;
   grid-template-areas:
     "sidebar stage"
     "sidebar timeline";
@@ -247,7 +247,7 @@ select {
   grid-area: timeline;
   display: grid;
   align-content: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   padding: 14px 22px 16px;
   background: #20241f;
@@ -289,7 +289,7 @@ select {
 
 .track {
   position: relative;
-  height: 22px;
+  height: 26px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
@@ -328,7 +328,7 @@ select {
 
 .track::after {
   position: absolute;
-  inset: 0 0 0 14.58%;
+  inset: 0;
   content: "";
   background: repeating-linear-gradient(
     90deg,
@@ -337,6 +337,108 @@ select {
     transparent 2px,
     transparent 18px
   );
+}
+
+.loop-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.loop-strip {
+  position: relative;
+  height: 28px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(228, 235, 229, 0.08), rgba(228, 235, 229, 0.02)),
+    #111411;
+  cursor: crosshair;
+}
+
+.loop-zone {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  border-radius: 4px;
+  opacity: 0.72;
+}
+
+.loop-zone.rf {
+  background: #c13f32;
+}
+
+.loop-zone.refocus {
+  background: #f0bd49;
+}
+
+.loop-zone.readout {
+  background: #5aa7ff;
+}
+
+.loop-marker {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: #84d1c5;
+  box-shadow: 0 0 10px rgba(132, 209, 197, 0.7);
+}
+
+.loop-selection {
+  position: absolute;
+  z-index: 2;
+  top: 3px;
+  bottom: 3px;
+  min-width: 18px;
+  border: 2px solid #84d1c5;
+  border-radius: 7px;
+  background: rgba(132, 209, 197, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(17, 20, 17, 0.4), 0 0 18px rgba(132, 209, 197, 0.2);
+}
+
+.loop-handle {
+  position: absolute;
+  top: -5px;
+  width: 16px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(228, 235, 229, 0.75);
+  border-radius: 6px;
+  background:
+    linear-gradient(90deg, transparent 4px, rgba(17, 20, 17, 0.7) 4px, rgba(17, 20, 17, 0.7) 6px, transparent 6px),
+    #84d1c5;
+  cursor: ew-resize;
+}
+
+.loop-handle.start {
+  left: -8px;
+}
+
+.loop-handle.end {
+  right: -8px;
+}
+
+.loop-readouts {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #e4ebe5;
+  font-size: 0.76rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.loop-readouts strong {
+  color: #f0bd49;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .cursor {
@@ -382,7 +484,7 @@ select {
 
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(430px, 58vh) auto 196px;
+    grid-template-rows: minmax(430px, 58vh) auto 252px;
     grid-template-areas:
       "stage"
       "sidebar"
@@ -416,5 +518,15 @@ select {
 
   .timeline-labels {
     grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .loop-editor {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .loop-readouts {
+    justify-content: space-between;
+    gap: 8px;
   }
 }

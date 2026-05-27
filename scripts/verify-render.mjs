@@ -168,6 +168,10 @@ for (const check of checks) {
             value: select.value,
             appSequence: window.__mrDemoStats?.sequence,
             samples: window.__mrDemoStats?.samples || 0,
+            loopStart: window.__mrDemoStats?.loopStart,
+            loopEnd: window.__mrDemoStats?.loopEnd,
+            cycleSeconds: window.__mrDemoStats?.cycleSeconds,
+            hasLoopControls: Boolean(document.querySelector('#loopStrip') && document.querySelector('#loopStartHandle') && document.querySelector('#loopEndHandle')),
             spinEchoControlsHidden: [...document.querySelectorAll('.spin-echo-only')].every((item) => item.hidden),
             eventZones: document.querySelectorAll('.event-zone').length,
             eventMarkers: document.querySelectorAll('.event-marker').length,
@@ -182,6 +186,44 @@ for (const check of checks) {
 
     next();
   })`);
+  const loopResults = await evaluate(cdp, `(() => {
+    const setter = window.__mrDemoSetLoopRange;
+    const strip = document.querySelector('#loopStrip');
+    const selection = document.querySelector('#loopSelection');
+    const startHandle = document.querySelector('#loopStartHandle');
+    const endHandle = document.querySelector('#loopEndHandle');
+    const chart = document.querySelector('#mzChart');
+
+    const setResult = typeof setter === 'function' ? setter(0.02, 0.12) : null;
+    const stats = window.__mrDemoStats || {};
+    const ctx = chart?.getContext('2d');
+    let chartBright = 0;
+    if (chart && ctx) {
+      const data = ctx.getImageData(0, 0, chart.width, chart.height).data;
+      for (let i = 0; i < data.length; i += 16) {
+        if (Math.max(data[i], data[i + 1], data[i + 2]) > 34) {
+          chartBright += 1;
+        }
+      }
+    }
+
+    return {
+      hasControls: Boolean(strip && selection && startHandle && endHandle),
+      setResult,
+      loopStart: stats.loopStart,
+      loopEnd: stats.loopEnd,
+      loopSpan: stats.loopSpan,
+      localTime: stats.localTime,
+      cycleSeconds: stats.cycleSeconds,
+      startReadout: document.querySelector('#loopStartReadout')?.textContent || '',
+      endReadout: document.querySelector('#loopEndReadout')?.textContent || '',
+      zoomReadout: document.querySelector('#zoomReadout')?.textContent || '',
+      eventZones: document.querySelectorAll('#eventTrack .event-zone').length,
+      selectionWidth: selection ? Number.parseFloat(getComputedStyle(selection).width) : 0,
+      chartBright,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
   const tissueResults = await evaluate(cdp, `new Promise((resolve) => {
     const presets = [
       { key: 'whiteMatter', t1: '850', t2: '80' },
@@ -258,7 +300,7 @@ for (const check of checks) {
 
     next();
   })`);
-  results.push({ ...check, stats, styleResults, sequenceResults, tissueResults, phantomResults });
+  results.push({ ...check, stats, styleResults, sequenceResults, loopResults, tissueResults, phantomResults });
 }
 
 await cdp.send('Page.close').catch(() => {});
@@ -283,6 +325,9 @@ const failed = results.filter((result) => {
       || sequence.appSequence !== sequence.sequence
       || sequence.samples <= 0
       || sequence.errors.length > 0
+      || !sequence.hasLoopControls
+      || sequence.loopEnd <= sequence.loopStart
+      || sequence.loopEnd >= sequence.cycleSeconds
       || !sequence.coilToggle
       || !sequence.chart.ok
       || sequence.chart.bright <= 0
@@ -308,7 +353,16 @@ const failed = results.filter((result) => {
       || phantom.samples <= 0
       || Number(phantom.readout) <= 0
       || phantom.errors.length > 0
-    ));
+    ))
+    || !result.loopResults.hasControls
+    || result.loopResults.errors.length > 0
+    || result.loopResults.loopStart < 0.019
+    || result.loopResults.loopEnd > 0.121
+    || result.loopResults.loopSpan <= 0.03
+    || result.loopResults.localTime < result.loopResults.loopStart
+    || result.loopResults.localTime > result.loopResults.loopEnd
+    || result.loopResults.selectionWidth <= 0
+    || result.loopResults.chartBright <= 0;
 });
 
 console.log(JSON.stringify({ results, events }, null, 2));

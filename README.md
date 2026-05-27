@@ -15,4 +15,6 @@ The vector style control supports classic arrows, slim needles, cone glyphs, and
 
 The sequence selector currently supports a single RF pulse and a Spin Echo sequence with adjustable echo time and refocusing angle.
 
+The lower timeline has a video-editor-style loop range: drag the handles on the mini strip to zoom the event track and Mz chart into a shorter window. Playback repeats inside that selected window, which makes the RF pulse and early dephasing easier to inspect even when T1/T2 settings require a long full cycle.
+
 The tissue presets provide approximate teaching values for white matter, gray matter, CSF/fluid, fat, and muscle; field strength, sequence, temperature, and fitting method can shift real T1/T2 values.
