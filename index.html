@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MR Excitation Demo</title>
+    <script>
+      window.__mrDemoErrors = [];
+      window.addEventListener('error', function (event) {
+        window.__mrDemoErrors.push(event.message || 'Unknown error');
+      });
+      window.addEventListener('unhandledrejection', function (event) {
+        window.__mrDemoErrors.push(String(event.reason || 'Unhandled promise rejection'));
+      });
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar" aria-label="Simulation controls">
+        <header class="brand">
+          <p class="eyebrow">MR excitation</p>
+          <h1>3D Shepp-Logan Phantom</h1>
+        </header>
+
+        <section class="control-section" aria-labelledby="playback-title">
+          <div class="section-heading">
+            <h2 id="playback-title">Playback</h2>
+            <div class="toolbar">
+              <button id="playPause" class="icon-button" type="button" title="Pause" aria-label="Pause">&#10073;&#10073;</button>
+              <button id="resetTime" class="icon-button" type="button" title="Reset time" aria-label="Reset time">&#8635;</button>
+              <button id="resetCamera" class="icon-button" type="button" title="Reset camera" aria-label="Reset camera">&#9711;</button>
+            </div>
+          </div>
+          <label class="control">
+            <span>Animation speed <output id="speedValue">1.0x</output></span>
+            <input id="speed" type="range" min="0.2" max="2.5" step="0.1" value="1" />
+          </label>
+        </section>
+
+        <section class="control-section" aria-labelledby="sequence-title">
+          <div class="section-heading">
+            <h2 id="sequence-title">Excitation</h2>
+          </div>
+          <label class="control">
+            <span>Flip angle <output id="flipValue">90 deg</output></span>
+            <input id="flipAngle" type="range" min="0" max="120" step="1" value="90" />
+          </label>
+          <label class="control">
+            <span>B0 visual precession <output id="b0Value">0.85 Hz</output></span>
+            <input id="b0Rate" type="range" min="0.1" max="2.2" step="0.05" value="0.85" />
+          </label>
+          <label class="control">
+            <span>Off-resonance spread <output id="offValue">0.45 Hz</output></span>
+            <input id="offRes" type="range" min="0" max="1.2" step="0.05" value="0.45" />
+          </label>
+          <label class="control">
+            <span>T2 decay <output id="t2Value">1600 ms</output></span>
+            <input id="t2" type="range" min="300" max="3000" step="50" value="1600" />
+          </label>
+        </section>
+
+        <section class="control-section" aria-labelledby="view-title">
+          <div class="section-heading">
+            <h2 id="view-title">View</h2>
+          </div>
+          <label class="control">
+            <span>Vector density <output id="densityValue">12</output></span>
+            <input id="density" type="range" min="7" max="16" step="1" value="12" />
+          </label>
+          <label class="check-row">
+            <input id="showPhantom" type="checkbox" checked />
+            <span>Phantom samples</span>
+          </label>
+          <label class="check-row">
+            <input id="showVectors" type="checkbox" checked />
+            <span>Moment vectors</span>
+          </label>
+          <label class="check-row">
+            <input id="showNet" type="checkbox" checked />
+            <span>Net magnetization</span>
+          </label>
+          <label class="check-row">
+            <input id="showField" type="checkbox" checked />
+            <span>B0 field</span>
+          </label>
+        </section>
+      </aside>
+
+      <main class="stage" aria-label="3D MR excitation visualization">
+        <div id="scene"></div>
+        <div class="readout" aria-live="polite">
+          <div>
+            <span class="readout-label">Time</span>
+            <strong id="timeReadout">0.00 s</strong>
+          </div>
+          <div>
+            <span class="readout-label">Mxy</span>
+            <strong id="mxyReadout">0.00</strong>
+          </div>
+          <div>
+            <span class="readout-label">Mz</span>
+            <strong id="mzReadout">1.00</strong>
+          </div>
+          <div>
+            <span class="readout-label">Samples</span>
+            <strong id="sampleReadout">0</strong>
+          </div>
+        </div>
+      </main>
+
+      <section class="timeline" aria-label="Sequence timing">
+        <div class="timeline-labels">
+          <span>RF pulse</span>
+          <span>Free precession under B0</span>
+          <span>Cycle reset</span>
+        </div>
+        <div class="track" aria-hidden="true">
+          <div class="rf-zone"></div>
+          <div id="timeCursor" class="cursor"></div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
