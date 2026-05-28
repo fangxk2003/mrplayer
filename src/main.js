@@ -32,6 +32,7 @@ const controlsUi = {
   loopEndHandle: document.querySelector('#loopEndHandle'),
   showPhantom: document.querySelector('#showPhantom'),
   showVectors: document.querySelector('#showVectors'),
+  showSliceVectorsOnly: document.querySelector('#showSliceVectorsOnly'),
   showNet: document.querySelector('#showNet'),
   showField: document.querySelector('#showField'),
   showCoil: document.querySelector('#showCoil'),
@@ -104,9 +105,12 @@ const state = {
   density: 12,
   vectorStyle: 'classic',
   phantomType: 'shepp-logan',
+  sliceVectorOnly: false,
   loopStart: 0,
   loopEnd: 0.08,
 };
+
+const rangeNumberControls = new Map();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111312);
@@ -159,6 +163,7 @@ const quat = new THREE.Quaternion();
 const yAxis = new THREE.Vector3(0, 1, 0);
 const dir = new THREE.Vector3();
 const scale = new THREE.Vector3();
+const hiddenVectorScale = new THREE.Vector3(0, 0, 0);
 const netDirection = new THREE.Vector3(0, 1, 0);
 const coilMaterials = [];
 const sliceMaterials = [];
@@ -210,6 +215,7 @@ function updateMoments(sequence = getSequenceConfig()) {
   let sumMy = 0;
   let sumMz = 0;
   let sumRho = 0;
+  let visibleVectorCount = 0;
   const glyphStyle = GLYPH_STYLES[state.vectorStyle] || GLYPH_STYLES.classic;
 
   for (let i = 0; i < samples.length; i += 1) {
@@ -219,13 +225,18 @@ function updateMoments(sequence = getSequenceConfig()) {
     const weightedMx = moment.mx * sample.rho;
     const weightedMy = moment.my * sample.rho;
 
-    dir.set(weightedMx, weightedMz, weightedMy);
-    const vectorLength = clamp(dir.length(), 0.08, 1.0);
-    dir.normalize();
+    if (vectorSampleVisible(sample)) {
+      visibleVectorCount += 1;
+      dir.set(weightedMx, weightedMz, weightedMy);
+      const vectorLength = clamp(dir.length(), 0.08, 1.0);
+      dir.normalize();
 
-    quat.setFromUnitVectors(yAxis, dir);
-    scale.set(glyphStyle.radialScale, glyphStyle.lengthScale * vectorLength, glyphStyle.radialScale);
-    matrix.compose(sample.position, quat, scale);
+      quat.setFromUnitVectors(yAxis, dir);
+      scale.set(glyphStyle.radialScale, glyphStyle.lengthScale * vectorLength, glyphStyle.radialScale);
+      matrix.compose(sample.position, quat, scale);
+    } else {
+      matrix.compose(sample.position, quat.identity(), hiddenVectorScale);
+    }
     arrowMesh.setMatrixAt(i, matrix);
 
     sumMx += weightedMx;
@@ -284,6 +295,8 @@ function updateMoments(sequence = getSequenceConfig()) {
     sliceGradientMtM: state.sliceGradientMtM,
     rfBandwidthKhz: state.rfBandwidthKhz,
     sliceThicknessMm: sliceThicknessMm(),
+    sliceVectorOnly: state.sliceVectorOnly,
+    visibleVectorCount,
     rfMode: rfModeLabel(),
     rfCenterHz: rfCenterFrequencyHz(),
     rfPeakB1Tesla: peakRfB1TeslaForAngle(state.flipAngle, sequence.rf90Seconds),
@@ -475,8 +488,9 @@ function getSpinEchoMoment(sample, localTime, sequence) {
       phase: Math.atan2(flippedVector.my, flippedVector.mx),
     };
   } else {
-    const mzBeforeRefocus = recoverMz(Math.cos(flip), sequence.refocusStart - sequence.rf90Seconds, t1Seconds);
-    const mzAfterRefocus = -mzBeforeRefocus * refocusEfficiency(refocus);
+    const preRefocusEndVector = getSpinEchoPreRefocusVector(sample, sequence.refocusEnd, sequence, localT2, localT2Inhom, t1Seconds, transverseBase, flip);
+    const postRefocusVector = rotateVectorTowardNegative(preRefocusEndVector, refocus);
+    const mzAfterRefocus = postRefocusVector.mz;
     mz = 1 - (1 - mzAfterRefocus) * Math.exp(-(localTime - sequence.refocusEnd) / t1Seconds);
   }
 
@@ -663,6 +677,14 @@ function sliceSelectionProfile(sample) {
 
   const amount = (distance - core) / (transition * 2);
   return 0.5 + 0.5 * Math.cos(Math.PI * amount);
+}
+
+function vectorSampleVisible(sample) {
+  if (!state.sliceVectorOnly || !state.sliceGradientEnabled) {
+    return true;
+  }
+
+  return sliceSelectionProfile(sample) >= 0.5;
 }
 
 function sliceGradientAt(time, sequence = getSequenceConfig()) {
@@ -1336,6 +1358,7 @@ function applyTissuePreset(presetKey) {
     state.t2Ms = preset.t2Ms;
     controlsUi.t1.value = String(state.t1Ms);
     controlsUi.t2.value = String(state.t2Ms);
+    syncAllRangeNumberInputs();
   }
 
   updateRelaxationOutputs();
@@ -1516,19 +1539,27 @@ function bindLoopControls() {
   window.__mrDemoGetSpinEchoProbe = () => {
     const sequence = getSequenceConfig();
     const sample = samples[Math.floor(samples.length / 2)] || samples[0];
+    const outsideSample = samples.find((candidate) => sliceSelectionProfile(candidate) < 0.01) || sample;
     const delta = Math.min(0.000001, sequence.refocusSeconds / 4);
     const before = getSpinEchoMoment(sample, sequence.refocusStart - delta, sequence);
     const justAfterStart = getSpinEchoMoment(sample, sequence.refocusStart + delta, sequence);
     const after = getSpinEchoMoment(sample, sequence.refocusEnd, sequence);
+    const outsideBefore = getSpinEchoMoment(outsideSample, sequence.refocusStart - delta, sequence);
+    const outsideAfter = getSpinEchoMoment(outsideSample, sequence.refocusEnd + delta, sequence);
     return {
       before,
       justAfterStart,
       after,
+      outsideProfile: sliceSelectionProfile(outsideSample),
+      outsideBefore,
+      outsideAfter,
       startDot: before.mx * justAfterStart.mx + before.my * justAfterStart.my + before.mz * justAfterStart.mz,
       endDot: before.mx * after.mx + before.my * after.my + before.mz * after.mz,
       beforeLength: Math.hypot(before.mx, before.my, before.mz),
       justAfterStartLength: Math.hypot(justAfterStart.mx, justAfterStart.my, justAfterStart.mz),
       afterLength: Math.hypot(after.mx, after.my, after.mz),
+      outsideBeforeLength: Math.hypot(outsideBefore.mx, outsideBefore.my, outsideBefore.mz),
+      outsideAfterLength: Math.hypot(outsideAfter.mx, outsideAfter.my, outsideAfter.mz),
       refocusStart: sequence.refocusStart,
       refocusEnd: sequence.refocusEnd,
     };
@@ -1587,6 +1618,197 @@ function bindLoopControls() {
       tbwReadout: outputs.rfTbw.textContent,
     };
   };
+}
+
+function enhanceRangeInputs() {
+  document.querySelectorAll('input[type="range"]').forEach((range) => {
+    if (rangeNumberControls.has(range)) {
+      return;
+    }
+
+    const config = getRangeNumberConfig(range);
+    const control = range.closest('.control');
+    control?.classList.add('range-enhanced-control');
+
+    const pair = document.createElement('div');
+    pair.className = 'range-input-pair';
+
+    const numberInput = document.createElement('input');
+    numberInput.type = 'number';
+    numberInput.className = 'range-number';
+    numberInput.min = formatNumberAttribute(config.min);
+    numberInput.max = formatNumberAttribute(config.max);
+    numberInput.step = config.step === 'any' ? 'any' : formatNumberAttribute(config.step);
+    numberInput.inputMode = 'decimal';
+    numberInput.setAttribute('aria-label', `${controlLabelText(range)} value`);
+
+    const numberWrap = document.createElement('div');
+    numberWrap.className = 'range-number-wrap';
+    const unit = rangeInputUnit(range);
+    if (unit) {
+      const unitLabel = document.createElement('div');
+      unitLabel.className = 'range-number-unit';
+      unitLabel.textContent = unit;
+      numberWrap.classList.add('has-unit');
+      numberWrap.append(numberInput, unitLabel);
+    } else {
+      numberWrap.append(numberInput);
+    }
+
+    range.parentNode.insertBefore(pair, range);
+    pair.append(range, numberWrap);
+    rangeNumberControls.set(range, { numberInput, config });
+
+    range.addEventListener('input', () => syncRangeNumberInput(range));
+    range.addEventListener('change', () => syncRangeNumberInput(range));
+    numberInput.addEventListener('change', () => commitRangeNumberInput(range));
+    numberInput.addEventListener('blur', () => commitRangeNumberInput(range));
+    numberInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      commitRangeNumberInput(range);
+      numberInput.select();
+    });
+
+    syncRangeNumberInput(range);
+  });
+}
+
+function rangeInputUnit(range) {
+  const units = {
+    speed: 'x',
+    flipAngle: 'deg',
+    refocusAngle: 'deg',
+    echoTime: 'ms',
+    b0Rate: 'T',
+    offRes: 'Hz',
+    sliceCenter: 'mm',
+    sliceGradient: 'mT/m',
+    rfBandwidth: 'kHz',
+    t1: 'ms',
+    t2: 'ms',
+    density: '',
+  };
+
+  return units[range.id] ?? '';
+}
+
+function getRangeNumberConfig(range) {
+  if (range.id === 'speed') {
+    return {
+      min: speedFromSlider(Number(range.min)),
+      max: speedFromSlider(Number(range.max)),
+      step: 'any',
+      rangeToNumber: (rangeValue) => speedFromSlider(rangeValue),
+      numberToRange: (numberValue) => Math.log10(numberValue),
+      format: formatNumberInputValue,
+    };
+  }
+
+  const scale = range.id === 'echoTime' ? 1000 : 1;
+  const rangeMin = Number(range.min);
+  const rangeMax = Number(range.max);
+  const rangeStep = Number(range.step);
+  return {
+    min: rangeMin * scale,
+    max: rangeMax * scale,
+    step: Number.isFinite(rangeStep) ? rangeStep * scale : 'any',
+    rangeToNumber: (rangeValue) => rangeValue * scale,
+    numberToRange: (numberValue) => numberValue / scale,
+    format: formatNumberInputValue,
+  };
+}
+
+function syncAllRangeNumberInputs() {
+  rangeNumberControls.forEach((_, range) => {
+    syncRangeNumberInput(range);
+  });
+}
+
+function syncRangeNumberInput(range) {
+  const control = rangeNumberControls.get(range);
+  if (!control) {
+    return;
+  }
+
+  const numberValue = control.config.rangeToNumber(Number(range.value));
+  control.numberInput.value = control.config.format(numberValue);
+}
+
+function commitRangeNumberInput(range) {
+  const control = rangeNumberControls.get(range);
+  if (!control) {
+    return;
+  }
+
+  const { numberInput, config } = control;
+  const typedValue = Number(numberInput.value);
+  if (!Number.isFinite(typedValue)) {
+    syncRangeNumberInput(range);
+    return;
+  }
+
+  const numericValue = clamp(snapNumberToStep(clamp(typedValue, config.min, config.max), config), config.min, config.max);
+  const rangeValue = clamp(config.numberToRange(numericValue), Number(range.min), Number(range.max));
+  range.value = formatNumberAttribute(rangeValue);
+  range.dispatchEvent(new Event('input', { bubbles: true }));
+  range.dispatchEvent(new Event('change', { bubbles: true }));
+  syncRangeNumberInput(range);
+}
+
+function snapNumberToStep(value, config) {
+  if (!Number.isFinite(config.step) || config.step <= 0) {
+    return value;
+  }
+
+  const snapped = config.min + Math.round((value - config.min) / config.step) * config.step;
+  return Number(snapped.toFixed(decimalPlaces(config.step)));
+}
+
+function decimalPlaces(value) {
+  const text = String(value);
+  if (!text.includes('e')) {
+    return (text.split('.')[1] || '').length;
+  }
+
+  const [, exponent = '0'] = text.split('e-');
+  return Number(exponent) || 0;
+}
+
+function formatNumberInputValue(value) {
+  if (!Number.isFinite(value)) {
+    return '';
+  }
+
+  const absValue = Math.abs(value);
+  if (absValue > 0 && (absValue < 0.0001 || absValue >= 1_000_000)) {
+    return value.toExponential(4).replace(/\.?0+e/, 'e');
+  }
+
+  const precision = absValue < 1 ? 6 : 4;
+  return String(Number(value.toFixed(precision)));
+}
+
+function formatNumberAttribute(value) {
+  return Number.isFinite(value) ? String(Number(value.toPrecision(12))) : String(value);
+}
+
+function controlLabelText(range) {
+  const label = range.closest('label')?.querySelector('span');
+  if (!label) {
+    return range.id || 'Control';
+  }
+
+  const text = Array.from(label.childNodes)
+    .filter((node) => node.nodeType === Node.TEXT_NODE)
+    .map((node) => node.textContent.trim())
+    .join(' ')
+    .trim();
+
+  return text || range.id || 'Control';
 }
 
 function beginLoopDrag(event, handle) {
@@ -1778,6 +2000,11 @@ function bindUi() {
   controlsUi.phantomType.addEventListener('change', () => {
     state.phantomType = controlsUi.phantomType.value;
     rebuildPhantom();
+  });
+
+  controlsUi.showSliceVectorsOnly.addEventListener('change', () => {
+    state.sliceVectorOnly = controlsUi.showSliceVectorsOnly.checked;
+    updateMoments();
   });
 
   [controlsUi.showPhantom, controlsUi.showVectors, controlsUi.showNet, controlsUi.showField, controlsUi.showCoil, controlsUi.showSlice].forEach((input) => {
@@ -2050,6 +2277,7 @@ buildAxes();
 buildB0Field();
 buildCoil();
 rebuildPhantom();
+enhanceRangeInputs();
 bindUi();
 resize();
 updateRelaxationOutputs();

@@ -324,6 +324,79 @@ for (const check of checks) {
       errors: [...(window.__mrDemoErrors || [])],
     };
   })()`);
+  const numberInputResults = await evaluate(cdp, `(() => {
+    const ranges = [...document.querySelectorAll('input[type="range"]')];
+
+    function numberFor(id) {
+      return document.querySelector('#' + id)?.closest('.range-input-pair')?.querySelector('.range-number') || null;
+    }
+
+    function commit(id, value) {
+      const range = document.querySelector('#' + id);
+      const number = numberFor(id);
+      if (!range || !number) {
+        return { ok: false, id };
+      }
+
+      number.value = value;
+      number.dispatchEvent(new Event('change', { bubbles: true }));
+      return {
+        ok: true,
+        id,
+        range: range.value,
+        number: number.value,
+        numericNumber: Number(number.value),
+      };
+    }
+
+    const all = ranges.map((range) => {
+      const number = numberFor(range.id);
+      const control = range.closest('.control');
+      const output = control?.querySelector('output') || null;
+      const unit = range.closest('.range-input-pair')?.querySelector('.range-number-unit') || null;
+      return {
+        id: range.id,
+        hasPair: Boolean(range.closest('.range-input-pair')),
+        hasNumber: Boolean(number),
+        unit: unit?.textContent || '',
+        outputHidden: output ? getComputedStyle(output).display === 'none' : false,
+        rangeMin: range.min,
+        rangeMax: range.max,
+        numberMin: number?.min || '',
+        numberMax: number?.max || '',
+        numberStep: number?.step || '',
+      };
+    });
+
+    const tests = {
+      t1High: commit('t1', '9999'),
+      t1Low: commit('t1', '100'),
+      echoHigh: commit('echoTime', '9999'),
+      echoLow: commit('echoTime', '-1'),
+      speedLow: commit('speed', '0'),
+      speedHigh: commit('speed', '999'),
+      sliceHigh: commit('sliceCenter', '999'),
+      sliceLow: commit('sliceCenter', '-999'),
+      densityHigh: commit('density', '99'),
+    };
+
+    return {
+      ok: true,
+      rangeCount: ranges.length,
+      numberCount: document.querySelectorAll('.range-number').length,
+      all,
+      tests,
+      readouts: {
+        t1: document.querySelector('#t1Value')?.textContent || '',
+        echoTime: document.querySelector('#teValue')?.textContent || '',
+        speed: document.querySelector('#speedValue')?.textContent || '',
+        sliceCenter: document.querySelector('#sliceCenterValue')?.textContent || '',
+        density: document.querySelector('#densityValue')?.textContent || '',
+      },
+      stats: window.__mrDemoStats || {},
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
   const rfResults = await evaluate(cdp, `(() => {
     const sequence = document.querySelector('#sequenceType');
     const enable = document.querySelector('#sliceGradientEnabled');
@@ -388,9 +461,11 @@ for (const check of checks) {
     const bandwidthReadout = document.querySelector('#rfBandwidthValue');
     const thicknessReadout = document.querySelector('#sliceThicknessValue');
     const showSlice = document.querySelector('#showSlice');
+    const showSliceVectorsOnly = document.querySelector('#showSliceVectorsOnly');
     const probe = window.__mrDemoGetSliceProbe;
+    const spinEchoProbe = window.__mrDemoGetSpinEchoProbe;
 
-    if (!sequence || !enable || !center || !gradient || !bandwidth || typeof probe !== 'function') {
+    if (!sequence || !enable || !center || !gradient || !bandwidth || !showSliceVectorsOnly || typeof probe !== 'function' || typeof spinEchoProbe !== 'function') {
       return { ok: false, reason: 'Missing slice selection controls' };
     }
 
@@ -406,7 +481,11 @@ for (const check of checks) {
     bandwidth.dispatchEvent(new Event('input', { bubbles: true }));
 
     const enabledProbe = probe();
+    const outsideMomentProbe = spinEchoProbe();
     const enabledStats = window.__mrDemoStats || {};
+    showSliceVectorsOnly.checked = true;
+    showSliceVectorsOnly.dispatchEvent(new Event('change', { bubbles: true }));
+    const sliceOnlyStats = window.__mrDemoStats || {};
     const enabledZones = [...document.querySelectorAll('.event-zone')].map((zone) => zone.className);
     const ssgChart = (() => {
       const canvas = document.querySelector('#ssgChart');
@@ -427,9 +506,12 @@ for (const check of checks) {
 
     enable.checked = false;
     enable.dispatchEvent(new Event('change', { bubbles: true }));
+    const sliceOnlyNoGradientStats = window.__mrDemoStats || {};
     const disabledProbe = probe();
     const disabledZones = [...document.querySelectorAll('.event-zone')].map((zone) => zone.className);
 
+    showSliceVectorsOnly.checked = false;
+    showSliceVectorsOnly.dispatchEvent(new Event('change', { bubbles: true }));
     enable.checked = true;
     enable.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -443,9 +525,13 @@ for (const check of checks) {
       bandwidthReadout: bandwidthReadout?.textContent || '',
       thicknessReadout: thicknessReadout?.textContent || '',
       showSliceChecked: Boolean(showSlice?.checked),
+      showSliceVectorsOnlyChecked: Boolean(showSliceVectorsOnly?.checked),
       enabledProbe,
+      outsideMomentProbe,
       disabledProbe,
       enabledStats,
+      sliceOnlyStats,
+      sliceOnlyNoGradientStats,
       enabledZones,
       disabledZones,
       ssgChart,
@@ -456,17 +542,20 @@ for (const check of checks) {
   const spinEchoEnvelopeResults = await evaluate(cdp, `(() => {
     const sequence = document.querySelector('#sequenceType');
     const frame = document.querySelector('#referenceFrame');
+    const echoTime = document.querySelector('#echoTime');
     const offRes = document.querySelector('#offRes');
     const sliceEnable = document.querySelector('#sliceGradientEnabled');
     const envelopeAt = window.__mrDemoGetSpinEchoEnvelope;
     const probe = window.__mrDemoGetSpinEchoProbe;
 
-    if (!sequence || !frame || !offRes || !sliceEnable || typeof envelopeAt !== 'function' || typeof probe !== 'function') {
+    if (!sequence || !frame || !echoTime || !offRes || !sliceEnable || typeof envelopeAt !== 'function' || typeof probe !== 'function') {
       return { ok: false, reason: 'Missing spin-echo envelope probes' };
     }
 
     sequence.value = 'spin-echo';
     sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    echoTime.value = '0.16';
+    echoTime.dispatchEvent(new Event('input', { bubbles: true }));
     sliceEnable.checked = false;
     sliceEnable.dispatchEvent(new Event('change', { bubbles: true }));
     frame.value = 'rotating';
@@ -583,6 +672,7 @@ for (const check of checks) {
     frameResults,
     speedResults,
     fieldResults,
+    numberInputResults,
     rfResults,
     spinEchoEnvelopeResults,
     sliceResults,
@@ -697,6 +787,39 @@ const failed = results.filter((result) => {
     || result.fieldResults.fieldReadout !== '1.50 T'
     || result.fieldResults.larmorReadout !== '63.87 MHz'
     || result.fieldResults.periodReadout !== '15.66 ns'
+    || !result.numberInputResults.ok
+    || result.numberInputResults.errors.length > 0
+    || result.numberInputResults.rangeCount <= 0
+    || result.numberInputResults.rangeCount !== result.numberInputResults.numberCount
+    || result.numberInputResults.all.some((control) => (
+      !control.hasPair
+      || !control.hasNumber
+      || !control.outputHidden
+      || control.numberMin === ''
+      || control.numberMax === ''
+    ))
+    || result.numberInputResults.all.some((control) => (
+      control.id !== 'density'
+      && control.unit === ''
+    ))
+    || result.numberInputResults.tests.t1High.range !== '5000'
+    || result.numberInputResults.tests.t1High.number !== '5000'
+    || result.numberInputResults.tests.t1Low.range !== '200'
+    || result.numberInputResults.tests.t1Low.number !== '200'
+    || result.numberInputResults.tests.echoHigh.range !== '0.5'
+    || result.numberInputResults.tests.echoHigh.number !== '500'
+    || result.numberInputResults.tests.echoLow.range !== '0.08'
+    || result.numberInputResults.tests.echoLow.number !== '80'
+    || result.numberInputResults.tests.speedLow.range !== '-9'
+    || Math.abs(result.numberInputResults.tests.speedLow.numericNumber - 1e-9) > 1e-12
+    || result.numberInputResults.tests.speedHigh.range !== '0.5'
+    || Math.abs(result.numberInputResults.tests.speedHigh.numericNumber - (10 ** 0.5)) > 0.0001
+    || result.numberInputResults.tests.sliceHigh.range !== '90'
+    || result.numberInputResults.tests.sliceHigh.number !== '90'
+    || result.numberInputResults.tests.sliceLow.range !== '-90'
+    || result.numberInputResults.tests.sliceLow.number !== '-90'
+    || result.numberInputResults.tests.densityHigh.range !== '16'
+    || result.numberInputResults.tests.densityHigh.number !== '16'
     || !result.rfResults.ok
     || result.rfResults.errors.length > 0
     || !result.rfResults.chart.ok
@@ -738,10 +861,20 @@ const failed = results.filter((result) => {
     || result.sliceResults.enabledProbe.maxProfile < 0.5
     || result.sliceResults.enabledProbe.inactiveSamples <= 0
     || result.sliceResults.enabledProbe.activeSamples <= 0
+    || result.sliceResults.outsideMomentProbe.outsideProfile >= 0.01
+    || Math.abs(result.sliceResults.outsideMomentProbe.outsideBefore.mz - 1) > 0.000001
+    || Math.abs(result.sliceResults.outsideMomentProbe.outsideAfter.mz - 1) > 0.00001
+    || result.sliceResults.outsideMomentProbe.outsideAfterLength < 0.999
     || result.sliceResults.disabledProbe.enabled
     || result.sliceResults.disabledProbe.minProfile < 0.999
     || result.sliceResults.enabledStats.sliceGradientEnabled !== true
     || Math.abs(result.sliceResults.enabledStats.sliceThicknessMm - result.sliceResults.enabledProbe.thicknessMm) > 0.001
+    || result.sliceResults.sliceOnlyStats.sliceVectorOnly !== true
+    || result.sliceResults.sliceOnlyStats.visibleVectorCount <= 0
+    || result.sliceResults.sliceOnlyStats.visibleVectorCount >= result.sliceResults.sliceOnlyStats.samples
+    || result.sliceResults.sliceOnlyNoGradientStats.sliceGradientEnabled !== false
+    || result.sliceResults.sliceOnlyNoGradientStats.sliceVectorOnly !== true
+    || result.sliceResults.sliceOnlyNoGradientStats.visibleVectorCount !== result.sliceResults.sliceOnlyNoGradientStats.samples
     || result.sliceResults.enabledZones.some((className) => className.includes('slice-gradient'))
     || result.sliceResults.disabledZones.some((className) => className.includes('slice-gradient'))
     || result.sliceResults.enabledProbe.waveform.length < 3
