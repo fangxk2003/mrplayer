@@ -181,6 +181,8 @@ for (const check of checks) {
             eventZones: document.querySelectorAll('.event-zone').length,
             eventMarkers: document.querySelectorAll('.event-marker').length,
             coilToggle: Boolean(document.querySelector('#showCoil')?.checked),
+            rfChart: chartStats('#rfChart'),
+            ssgChart: chartStats('#ssgChart'),
             chart: chartStats('#mzChart'),
             mxyChart: chartStats('#mxyChart'),
             errors: [...(window.__mrDemoErrors || [])],
@@ -322,19 +324,151 @@ for (const check of checks) {
       errors: [...(window.__mrDemoErrors || [])],
     };
   })()`);
+  const rfResults = await evaluate(cdp, `(() => {
+    const sequence = document.querySelector('#sequenceType');
+    const enable = document.querySelector('#sliceGradientEnabled');
+    const bandwidth = document.querySelector('#rfBandwidth');
+    const center = document.querySelector('#sliceCenter');
+    const gradient = document.querySelector('#sliceGradient');
+    const probe = window.__mrDemoGetRfProbe;
+    const chart = document.querySelector('#rfChart');
+
+    if (!sequence || !enable || !bandwidth || !center || !gradient || typeof probe !== 'function' || !chart) {
+      return { ok: false, reason: 'Missing RF waveform controls' };
+    }
+
+    sequence.value = 'single-pulse';
+    sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    enable.checked = false;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+    const hard = probe();
+
+    sequence.value = 'spin-echo';
+    sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    enable.checked = true;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+    bandwidth.value = '4';
+    bandwidth.dispatchEvent(new Event('input', { bubbles: true }));
+    center.value = '20';
+    center.dispatchEvent(new Event('input', { bubbles: true }));
+    gradient.value = '5';
+    gradient.dispatchEvent(new Event('input', { bubbles: true }));
+    const sinc = probe();
+
+    const ctx = chart.getContext('2d');
+    const data = ctx.getImageData(0, 0, chart.width, chart.height).data;
+    let bright = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      if (Math.max(data[i], data[i + 1], data[i + 2]) > 34) {
+        bright += 1;
+      }
+    }
+
+    return {
+      ok: true,
+      hard,
+      sinc,
+      chart: { ok: true, width: chart.width, height: chart.height, bright },
+      modeReadout: document.querySelector('#rfModeValue')?.textContent || '',
+      centerReadout: document.querySelector('#rfCenterValue')?.textContent || '',
+      peakReadout: document.querySelector('#rfPeakB1Value')?.textContent || '',
+      tbwReadout: document.querySelector('#rfTbwValue')?.textContent || '',
+      chartReadout: document.querySelector('#chartRfReadout')?.textContent || '',
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
+  const sliceResults = await evaluate(cdp, `(() => {
+    const sequence = document.querySelector('#sequenceType');
+    const enable = document.querySelector('#sliceGradientEnabled');
+    const center = document.querySelector('#sliceCenter');
+    const gradient = document.querySelector('#sliceGradient');
+    const bandwidth = document.querySelector('#rfBandwidth');
+    const centerReadout = document.querySelector('#sliceCenterValue');
+    const gradientReadout = document.querySelector('#sliceGradientValue');
+    const bandwidthReadout = document.querySelector('#rfBandwidthValue');
+    const thicknessReadout = document.querySelector('#sliceThicknessValue');
+    const showSlice = document.querySelector('#showSlice');
+    const probe = window.__mrDemoGetSliceProbe;
+
+    if (!sequence || !enable || !center || !gradient || !bandwidth || typeof probe !== 'function') {
+      return { ok: false, reason: 'Missing slice selection controls' };
+    }
+
+    sequence.value = 'spin-echo';
+    sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    enable.checked = true;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+    center.value = '20';
+    center.dispatchEvent(new Event('input', { bubbles: true }));
+    gradient.value = '5';
+    gradient.dispatchEvent(new Event('input', { bubbles: true }));
+    bandwidth.value = '4';
+    bandwidth.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const enabledProbe = probe();
+    const enabledStats = window.__mrDemoStats || {};
+    const enabledZones = [...document.querySelectorAll('.event-zone')].map((zone) => zone.className);
+    const ssgChart = (() => {
+      const canvas = document.querySelector('#ssgChart');
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) {
+        return { ok: false };
+      }
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let bright = 0;
+      for (let i = 0; i < data.length; i += 16) {
+        if (Math.max(data[i], data[i + 1], data[i + 2]) > 34) {
+          bright += 1;
+        }
+      }
+      return { ok: true, width: canvas.width, height: canvas.height, bright };
+    })();
+    const ssgReadout = document.querySelector('#chartSsgReadout')?.textContent || '';
+
+    enable.checked = false;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+    const disabledProbe = probe();
+    const disabledZones = [...document.querySelectorAll('.event-zone')].map((zone) => zone.className);
+
+    enable.checked = true;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+
+    return {
+      ok: true,
+      centerValue: center.value,
+      gradientValue: gradient.value,
+      bandwidthValue: bandwidth.value,
+      centerReadout: centerReadout?.textContent || '',
+      gradientReadout: gradientReadout?.textContent || '',
+      bandwidthReadout: bandwidthReadout?.textContent || '',
+      thicknessReadout: thicknessReadout?.textContent || '',
+      showSliceChecked: Boolean(showSlice?.checked),
+      enabledProbe,
+      disabledProbe,
+      enabledStats,
+      enabledZones,
+      disabledZones,
+      ssgChart,
+      ssgReadout,
+      errors: [...(window.__mrDemoErrors || [])],
+    };
+  })()`);
   const spinEchoEnvelopeResults = await evaluate(cdp, `(() => {
     const sequence = document.querySelector('#sequenceType');
     const frame = document.querySelector('#referenceFrame');
     const offRes = document.querySelector('#offRes');
+    const sliceEnable = document.querySelector('#sliceGradientEnabled');
     const envelopeAt = window.__mrDemoGetSpinEchoEnvelope;
     const probe = window.__mrDemoGetSpinEchoProbe;
 
-    if (!sequence || !frame || !offRes || typeof envelopeAt !== 'function' || typeof probe !== 'function') {
+    if (!sequence || !frame || !offRes || !sliceEnable || typeof envelopeAt !== 'function' || typeof probe !== 'function') {
       return { ok: false, reason: 'Missing spin-echo envelope probes' };
     }
 
     sequence.value = 'spin-echo';
     sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    sliceEnable.checked = false;
+    sliceEnable.dispatchEvent(new Event('change', { bubbles: true }));
     frame.value = 'rotating';
     frame.dispatchEvent(new Event('change', { bubbles: true }));
     offRes.value = '0.45';
@@ -449,7 +583,9 @@ for (const check of checks) {
     frameResults,
     speedResults,
     fieldResults,
+    rfResults,
     spinEchoEnvelopeResults,
+    sliceResults,
     tissueResults,
     phantomResults,
   });
@@ -487,6 +623,10 @@ const failed = results.filter((result) => {
         || Math.abs(sequence.refocusCenter - sequence.echoTime / 2) > 0.00001
       ))
       || !sequence.coilToggle
+      || !sequence.rfChart.ok
+      || sequence.rfChart.bright <= 0
+      || !sequence.ssgChart.ok
+      || sequence.ssgChart.bright <= 0
       || !sequence.chart.ok
       || sequence.chart.bright <= 0
       || !sequence.mxyChart.ok
@@ -494,7 +634,7 @@ const failed = results.filter((result) => {
       || (sequence.sequence === 'single-pulse' && !sequence.spinEchoControlsHidden)
       || (sequence.sequence === 'spin-echo' && (
         sequence.spinEchoControlsHidden
-        || sequence.eventZones < 3
+        || sequence.eventZones !== 1
         || sequence.eventMarkers < 1
       ))
     ))
@@ -557,6 +697,57 @@ const failed = results.filter((result) => {
     || result.fieldResults.fieldReadout !== '1.50 T'
     || result.fieldResults.larmorReadout !== '63.87 MHz'
     || result.fieldResults.periodReadout !== '15.66 ns'
+    || !result.rfResults.ok
+    || result.rfResults.errors.length > 0
+    || !result.rfResults.chart.ok
+    || result.rfResults.chart.bright <= 0
+    || result.rfResults.hard.mode !== 'Single frequency'
+    || result.rfResults.hard.sliceGradientEnabled !== false
+    || result.rfResults.hard.pulses.length !== 1
+    || Math.abs(result.rfResults.hard.pulses[0].peakTesla - (Math.PI / 2) / (2 * Math.PI * 42577478.92 * 0.003)) > 1e-10
+    || result.rfResults.hard.pulses[0].tbw !== null
+    || result.rfResults.sinc.mode !== 'Windowed sinc'
+    || result.rfResults.sinc.sliceGradientEnabled !== true
+    || result.rfResults.sinc.pulses.length !== 2
+    || Math.abs(result.rfResults.sinc.pulses[0].tbw - 12) > 0.000001
+    || Math.abs(result.rfResults.sinc.pulses[1].tbw - 24) > 0.000001
+    || result.rfResults.sinc.pulses[0].peakTesla <= result.rfResults.hard.pulses[0].peakTesla
+    || Math.abs(result.rfResults.sinc.carrierHz - (63866218.38 + 42577478.92 * 0.005 * 0.02)) > 2
+    || result.rfResults.modeReadout !== 'Windowed sinc'
+    || result.rfResults.tbwReadout !== '12.0'
+    || !result.rfResults.peakReadout.endsWith('uT')
+    || !result.rfResults.chartReadout.endsWith('T')
+    || !result.sliceResults.ok
+    || result.sliceResults.errors.length > 0
+    || result.sliceResults.centerValue !== '20'
+    || result.sliceResults.gradientValue !== '5'
+    || result.sliceResults.bandwidthValue !== '4'
+    || result.sliceResults.centerReadout !== '20 mm'
+    || result.sliceResults.gradientReadout !== '5.0 mT/m'
+    || result.sliceResults.bandwidthReadout !== '4.0 kHz'
+    || !result.sliceResults.thicknessReadout.endsWith('mm')
+    || !result.sliceResults.showSliceChecked
+    || !result.sliceResults.ssgChart.ok
+    || result.sliceResults.ssgChart.bright <= 0
+    || !result.sliceResults.ssgReadout.endsWith('mT/m')
+    || !result.sliceResults.enabledProbe.enabled
+    || Math.abs(result.sliceResults.enabledProbe.centerMm - 20) > 0.000001
+    || Math.abs(result.sliceResults.enabledProbe.gradientMtM - 5) > 0.000001
+    || Math.abs(result.sliceResults.enabledProbe.bandwidthKhz - 4) > 0.000001
+    || Math.abs(result.sliceResults.enabledProbe.thicknessMm - (4000 / (42577478.92 * 0.005) * 1000)) > 0.01
+    || result.sliceResults.enabledProbe.maxProfile < 0.5
+    || result.sliceResults.enabledProbe.inactiveSamples <= 0
+    || result.sliceResults.enabledProbe.activeSamples <= 0
+    || result.sliceResults.disabledProbe.enabled
+    || result.sliceResults.disabledProbe.minProfile < 0.999
+    || result.sliceResults.enabledStats.sliceGradientEnabled !== true
+    || Math.abs(result.sliceResults.enabledStats.sliceThicknessMm - result.sliceResults.enabledProbe.thicknessMm) > 0.001
+    || result.sliceResults.enabledZones.some((className) => className.includes('slice-gradient'))
+    || result.sliceResults.disabledZones.some((className) => className.includes('slice-gradient'))
+    || result.sliceResults.enabledProbe.waveform.length < 3
+    || Math.abs(result.sliceResults.enabledProbe.ssgDuringRf - 5) > 0.000001
+    || Math.abs(result.sliceResults.enabledProbe.ssgRephase + 5) > 0.000001
+    || Math.abs(result.sliceResults.enabledProbe.ssgDuringRefocus - 5) > 0.000001
     || !result.spinEchoEnvelopeResults.ok
     || result.spinEchoEnvelopeResults.errors.length > 0
     || result.spinEchoEnvelopeResults.samples.some((sample) => (

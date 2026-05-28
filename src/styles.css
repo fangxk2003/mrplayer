@@ -31,7 +31,7 @@ body {
 #app {
   display: grid;
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) 302px;
+  grid-template-rows: minmax(0, 1fr) 438px;
   grid-template-areas:
     "sidebar stage"
     "sidebar timeline";
@@ -327,6 +327,12 @@ select {
   background: #f0bd49;
 }
 
+.event-zone.slice-gradient {
+  top: 50%;
+  background: #b85cff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
 .event-zone.readout {
   background: rgba(90, 167, 255, 0.46);
 }
@@ -390,6 +396,12 @@ select {
 
 .loop-zone.refocus {
   background: #f0bd49;
+}
+
+.loop-zone.slice-gradient {
+  top: 15px;
+  bottom: 5px;
+  background: #b85cff;
 }
 
 .loop-zone.readout {
@@ -487,7 +499,7 @@ select {
 .signal-chart {
   display: block;
   width: 100%;
-  height: 54px;
+  height: 48px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   background: #141714;
@@ -500,7 +512,7 @@ select {
 
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(430px, 58vh) auto 322px;
+    grid-template-rows: minmax(430px, 58vh) auto 458px;
     grid-template-areas:
       "stage"
       "sidebar"

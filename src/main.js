@@ -16,6 +16,10 @@ const controlsUi = {
   echoTime: document.querySelector('#echoTime'),
   b0Rate: document.querySelector('#b0Rate'),
   offRes: document.querySelector('#offRes'),
+  sliceGradientEnabled: document.querySelector('#sliceGradientEnabled'),
+  sliceCenter: document.querySelector('#sliceCenter'),
+  sliceGradient: document.querySelector('#sliceGradient'),
+  rfBandwidth: document.querySelector('#rfBandwidth'),
   tissuePreset: document.querySelector('#tissuePreset'),
   t1: document.querySelector('#t1'),
   t2: document.querySelector('#t2'),
@@ -31,6 +35,7 @@ const controlsUi = {
   showNet: document.querySelector('#showNet'),
   showField: document.querySelector('#showField'),
   showCoil: document.querySelector('#showCoil'),
+  showSlice: document.querySelector('#showSlice'),
 };
 
 const outputs = {
@@ -39,6 +44,14 @@ const outputs = {
   te: document.querySelector('#teValue'),
   b0: document.querySelector('#b0Value'),
   off: document.querySelector('#offValue'),
+  sliceCenter: document.querySelector('#sliceCenterValue'),
+  sliceGradient: document.querySelector('#sliceGradientValue'),
+  rfBandwidth: document.querySelector('#rfBandwidthValue'),
+  sliceThickness: document.querySelector('#sliceThicknessValue'),
+  rfMode: document.querySelector('#rfModeValue'),
+  rfCenter: document.querySelector('#rfCenterValue'),
+  rfPeakB1: document.querySelector('#rfPeakB1Value'),
+  rfTbw: document.querySelector('#rfTbwValue'),
   t1: document.querySelector('#t1Value'),
   t2: document.querySelector('#t2Value'),
   speed: document.querySelector('#speedValue'),
@@ -53,6 +66,10 @@ const outputs = {
   phaseLabelA: document.querySelector('#phaseLabelA'),
   phaseLabelB: document.querySelector('#phaseLabelB'),
   phaseLabelC: document.querySelector('#phaseLabelC'),
+  chartRf: document.querySelector('#chartRfReadout'),
+  rfChart: document.querySelector('#rfChart'),
+  chartSsg: document.querySelector('#chartSsgReadout'),
+  ssgChart: document.querySelector('#ssgChart'),
   chartMz: document.querySelector('#chartMzReadout'),
   mzChart: document.querySelector('#mzChart'),
   chartMxy: document.querySelector('#chartMxyReadout'),
@@ -76,6 +93,10 @@ const state = {
   echoTime: 0.16,
   b0Tesla: 1.5,
   offRes: 0.45,
+  sliceGradientEnabled: true,
+  sliceCenterMm: 0,
+  sliceGradientMtM: 3,
+  rfBandwidthKhz: 5,
   tissuePreset: 'grayMatter',
   t1Ms: 1300,
   t2Ms: 100,
@@ -126,8 +147,9 @@ const phantomGroup = new THREE.Group();
 const vectorGroup = new THREE.Group();
 const fieldGroup = new THREE.Group();
 const coilGroup = new THREE.Group();
+const sliceGroup = new THREE.Group();
 const axesGroup = new THREE.Group();
-scene.add(phantomGroup, vectorGroup, fieldGroup, coilGroup, axesGroup);
+scene.add(phantomGroup, vectorGroup, fieldGroup, coilGroup, sliceGroup, axesGroup);
 
 let samples = [];
 let arrowMesh = null;
@@ -139,12 +161,18 @@ const dir = new THREE.Vector3();
 const scale = new THREE.Vector3();
 const netDirection = new THREE.Vector3(0, 1, 0);
 const coilMaterials = [];
+const sliceMaterials = [];
 const TAU = Math.PI * 2;
 const PROTON_GYROMAGNETIC_RATIO_MHZ_T = 42.57747892;
+const PROTON_GYROMAGNETIC_RATIO_HZ_T = PROTON_GYROMAGNETIC_RATIO_MHZ_T * 1_000_000;
+const PROTON_GYROMAGNETIC_RATIO_RAD_T = TAU * PROTON_GYROMAGNETIC_RATIO_HZ_T;
 const RF_90_SECONDS = 0.003;
 const RF_EPSILON_SECONDS = 0.0001;
+const RF_INTEGRATION_STEPS = 2048;
 const SPEED_SLIDER_MIN = -9;
 const SPEED_SLIDER_MAX = 0.5;
+const PHANTOM_FOV_MM = 220;
+const PHANTOM_SCENE_SCALE = 1.35;
 
 const netArrow = new THREE.ArrowHelper(netDirection, new THREE.Vector3(0, 0, 0), 0.9, 0xf3b846, 0.17, 0.08);
 netArrow.line.material.linewidth = 3;
@@ -221,10 +249,14 @@ function updateMoments(sequence = getSequenceConfig()) {
   outputs.time.textContent = formatSimulationTime(localTime);
   outputs.mxy.textContent = mxy.toFixed(2);
   outputs.mz.textContent = normMz.toFixed(2);
+  outputs.chartRf.textContent = formatB1Microtesla(rfB1At(localTime, sequence));
+  outputs.chartSsg.textContent = `${sliceGradientAt(localTime, sequence).toFixed(1)} mT/m`;
   outputs.chartMz.textContent = normMz.toFixed(2);
   outputs.chartMxy.textContent = mxy.toFixed(2);
   outputs.cursor.style.left = `${timeToWindowPercent(localTime, loop)}%`;
   updateCoil(localTime, sequence);
+  drawRfChart(localTime, sequence, loop);
+  drawSsgChart(localTime, sequence, loop);
   drawMzChart(localTime, sequence, loop);
   drawMxyChart(localTime, sequence, loop);
 
@@ -247,6 +279,17 @@ function updateMoments(sequence = getSequenceConfig()) {
     b0Tesla: state.b0Tesla,
     larmorHz: larmorFrequencyHz(),
     larmorPeriodSeconds: larmorPeriodSeconds(),
+    sliceGradientEnabled: state.sliceGradientEnabled,
+    sliceCenterMm: state.sliceCenterMm,
+    sliceGradientMtM: state.sliceGradientMtM,
+    rfBandwidthKhz: state.rfBandwidthKhz,
+    sliceThicknessMm: sliceThicknessMm(),
+    rfMode: rfModeLabel(),
+    rfCenterHz: rfCenterFrequencyHz(),
+    rfPeakB1Tesla: peakRfB1TeslaForAngle(state.flipAngle, sequence.rf90Seconds),
+    rfTbw90: rfTimeBandwidthProduct(sequence.rf90Seconds),
+    rfB1Tesla: rfB1At(localTime, sequence),
+    ssgMtM: sliceGradientAt(localTime, sequence),
     displayedMainFieldCycles: displayedMainFieldCycles(localTime),
     speed: state.speed,
     speedSlider: Number(controlsUi.speed.value),
@@ -293,7 +336,7 @@ function rfPulseSecondsForAngle(angleDegrees) {
 }
 
 function larmorFrequencyHz() {
-  return PROTON_GYROMAGNETIC_RATIO_MHZ_T * 1_000_000 * state.b0Tesla;
+  return PROTON_GYROMAGNETIC_RATIO_HZ_T * state.b0Tesla;
 }
 
 function larmorPeriodSeconds() {
@@ -366,10 +409,11 @@ function getMomentAt(sample, localTime, sequence) {
 }
 
 function getSinglePulseMoment(sample, localTime, sequence) {
+  const profile = sliceSelectionProfile(sample);
   const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
   const pulseProgress = clamp(localTime / rfSeconds, 0, 1);
   const rfEase = smoothstep(pulseProgress);
-  const flip = degToRad(state.flipAngle);
+  const flip = degToRad(state.flipAngle) * profile;
   const freeTime = Math.max(0, localTime - sequence.rf90Seconds);
   const inPulse = localTime < sequence.rf90Seconds;
   const theta = inPulse ? flip * rfEase : flip;
@@ -395,8 +439,9 @@ function getSinglePulseMoment(sample, localTime, sequence) {
 }
 
 function getSpinEchoMoment(sample, localTime, sequence) {
-  const flip = degToRad(state.flipAngle);
-  const refocus = degToRad(state.refocusAngle);
+  const profile = sliceSelectionProfile(sample);
+  const flip = degToRad(state.flipAngle) * profile;
+  const refocus = degToRad(state.refocusAngle) * profile;
   const t1Seconds = (state.t1Ms / 1000) * sample.t1Scale;
   const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
   const localT2Inhom = t2InhomSeconds();
@@ -421,7 +466,7 @@ function getSpinEchoMoment(sample, localTime, sequence) {
     mz = recoverMz(Math.cos(flip), timeSinceExcitation, t1Seconds);
   } else if (localTime <= sequence.refocusEnd) {
     const refocusProgress = smoothstep(clamp((localTime - sequence.refocusStart) / refocusSeconds, 0, 1));
-    const beforeVector = getSpinEchoPreRefocusVector(sample, localTime, sequence, localT2, localT2Inhom, t1Seconds, transverseBase);
+    const beforeVector = getSpinEchoPreRefocusVector(sample, localTime, sequence, localT2, localT2Inhom, t1Seconds, transverseBase, flip);
     const flippedVector = rotateVectorTowardNegative(beforeVector, refocus * refocusProgress);
     return {
       mx: flippedVector.mx,
@@ -462,10 +507,217 @@ function t2InhomSeconds() {
   return 1 / (TAU * spreadHz);
 }
 
-function getSpinEchoPreRefocusVector(sample, localTime, sequence, t2Seconds, t2Inhom, t1Seconds, transverseBase) {
+function sliceThicknessMm() {
+  const bandwidthHz = Math.max(0.001, state.rfBandwidthKhz) * 1000;
+  const gradientTeslaPerMeter = Math.max(0.001, state.sliceGradientMtM) / 1000;
+  return (bandwidthHz / (PROTON_GYROMAGNETIC_RATIO_HZ_T * gradientTeslaPerMeter)) * 1000;
+}
+
+function sampleSliceMm(sample) {
+  return sample.z * PHANTOM_FOV_MM * 0.5;
+}
+
+function rfCenterFrequencyHz() {
+  if (!state.sliceGradientEnabled) {
+    return larmorFrequencyHz();
+  }
+
+  const gradientTeslaPerMeter = state.sliceGradientMtM / 1000;
+  const centerMeters = state.sliceCenterMm / 1000;
+  return larmorFrequencyHz() + PROTON_GYROMAGNETIC_RATIO_HZ_T * gradientTeslaPerMeter * centerMeters;
+}
+
+function rfModeLabel() {
+  return state.sliceGradientEnabled ? 'Windowed sinc' : 'Single frequency';
+}
+
+function rfTimeBandwidthProduct(durationSeconds) {
+  if (!state.sliceGradientEnabled) {
+    return null;
+  }
+  return Math.max(0, state.rfBandwidthKhz) * 1000 * durationSeconds;
+}
+
+function rfPulseEvents(sequence = getSequenceConfig()) {
+  if (sequence.type === 'spin-echo') {
+    return [
+      {
+        label: '90 deg RF',
+        start: 0,
+        end: sequence.rf90Seconds,
+        angle: state.flipAngle,
+      },
+      {
+        label: '180 deg RF',
+        start: sequence.refocusStart,
+        end: sequence.refocusEnd,
+        angle: state.refocusAngle,
+      },
+    ];
+  }
+
+  return [
+    {
+      label: 'RF pulse',
+      start: 0,
+      end: sequence.rf90Seconds,
+      angle: state.flipAngle,
+    },
+  ];
+}
+
+function rfB1At(time, sequence = getSequenceConfig()) {
+  for (const pulse of rfPulseEvents(sequence)) {
+    if (time < pulse.start || time > pulse.end) {
+      continue;
+    }
+
+    const duration = Math.max(RF_EPSILON_SECONDS, pulse.end - pulse.start);
+    const relativeTime = clamp(time - pulse.start, 0, duration);
+    return rfPulseB1TeslaAt(relativeTime, duration, pulse.angle);
+  }
+  return 0;
+}
+
+function rfPulseB1TeslaAt(relativeTime, durationSeconds, angleDegrees) {
+  const shape = rfPulseShape(relativeTime, durationSeconds);
+  return rfPulseScaleTesla(angleDegrees, durationSeconds) * shape;
+}
+
+function peakRfB1TeslaForAngle(angleDegrees, durationSeconds) {
+  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
+  const scaleTesla = rfPulseScaleTesla(angleDegrees, duration);
+  if (!state.sliceGradientEnabled) {
+    return Math.abs(scaleTesla);
+  }
+
+  let peakShape = 0;
+  for (let i = 0; i <= RF_INTEGRATION_STEPS; i += 1) {
+    const time = (duration * i) / RF_INTEGRATION_STEPS;
+    peakShape = Math.max(peakShape, Math.abs(rfPulseShape(time, duration)));
+  }
+  return Math.abs(scaleTesla) * peakShape;
+}
+
+function rfPulseScaleTesla(angleDegrees, durationSeconds) {
+  const flipRadians = degToRad(angleDegrees);
+  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
+  const shapeIntegral = integrateRfPulseShape(duration);
+  if (Math.abs(shapeIntegral) < 1e-12) {
+    return 0;
+  }
+  return flipRadians / (PROTON_GYROMAGNETIC_RATIO_RAD_T * shapeIntegral);
+}
+
+function integrateRfPulseShape(durationSeconds) {
+  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
+  if (!state.sliceGradientEnabled) {
+    return duration;
+  }
+
+  let sum = 0;
+  for (let i = 0; i < RF_INTEGRATION_STEPS; i += 1) {
+    const time = duration * ((i + 0.5) / RF_INTEGRATION_STEPS);
+    sum += rfPulseShape(time, duration);
+  }
+  return (sum / RF_INTEGRATION_STEPS) * duration;
+}
+
+function rfPulseShape(relativeTime, durationSeconds) {
+  if (!state.sliceGradientEnabled) {
+    return 1;
+  }
+
+  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
+  const progress = clamp(relativeTime / duration, 0, 1);
+  const centeredTime = relativeTime - duration / 2;
+  const bandwidthHz = Math.max(0.001, state.rfBandwidthKhz) * 1000;
+  const hamming = 0.54 - 0.46 * Math.cos(TAU * progress);
+  return normalizedSinc(bandwidthHz * centeredTime) * hamming;
+}
+
+function normalizedSinc(value) {
+  if (Math.abs(value) < 1e-8) {
+    return 1;
+  }
+  return Math.sin(Math.PI * value) / (Math.PI * value);
+}
+
+function sliceSelectionProfile(sample) {
+  if (!state.sliceGradientEnabled) {
+    return 1;
+  }
+
+  const thickness = sliceThicknessMm();
+  const halfThickness = Math.max(1, thickness * 0.5);
+  const transition = Math.max(2, halfThickness * 0.22);
+  const core = Math.max(0, halfThickness - transition);
+  const distance = Math.abs(sampleSliceMm(sample) - state.sliceCenterMm);
+
+  if (distance <= core) {
+    return 1;
+  }
+  if (distance >= core + transition * 2) {
+    return 0;
+  }
+
+  const amount = (distance - core) / (transition * 2);
+  return 0.5 + 0.5 * Math.cos(Math.PI * amount);
+}
+
+function sliceGradientAt(time, sequence = getSequenceConfig()) {
+  if (!state.sliceGradientEnabled) {
+    return 0;
+  }
+
+  const waveform = sliceGradientWaveform(sequence);
+  for (const lobe of waveform) {
+    if (time >= lobe.start && time <= lobe.end) {
+      return state.sliceGradientMtM * lobe.level;
+    }
+  }
+  return 0;
+}
+
+function sliceGradientWaveform(sequence = getSequenceConfig()) {
+  if (!state.sliceGradientEnabled) {
+    return [];
+  }
+
+  const lobes = [];
+  if (sequence.rf90Seconds > RF_EPSILON_SECONDS) {
+    lobes.push({
+      label: sequence.type === 'spin-echo' ? '90 deg slice select' : 'RF slice select',
+      start: 0,
+      end: sequence.rf90Seconds,
+      level: 1,
+    });
+
+    const rephaseDuration = sequence.rf90Seconds / 2;
+    lobes.push({
+      label: 'Slice rephase lobe',
+      start: sequence.rf90Seconds,
+      end: sequence.rf90Seconds + rephaseDuration,
+      level: -1,
+    });
+  }
+
+  if (sequence.type === 'spin-echo' && sequence.refocusSeconds > RF_EPSILON_SECONDS) {
+    lobes.push({
+      label: '180 deg slice select',
+      start: sequence.refocusStart,
+      end: sequence.refocusEnd,
+      level: 1,
+    });
+  }
+
+  return lobes;
+}
+
+function getSpinEchoPreRefocusVector(sample, localTime, sequence, t2Seconds, t2Inhom, t1Seconds, transverseBase, flipRadians) {
   const envelope = getSpinEchoEnvelope(localTime, sequence, t2Seconds, t2Inhom);
   const transverse = transverseBase * envelope.transverse;
-  const mz = recoverMz(Math.cos(degToRad(state.flipAngle)), envelope.timeSinceExcitation, t1Seconds);
+  const mz = recoverMz(Math.cos(flipRadians), envelope.timeSinceExcitation, t1Seconds);
   const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * envelope.timeSinceExcitation;
   const phase = TAU * positiveModulo(phaseCycles, 1);
 
@@ -576,6 +828,46 @@ function drawMzChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
   });
 }
 
+function drawRfChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
+  const peakTesla = Math.max(
+    0.25e-6,
+    ...rfPulseEvents(sequence).map((event) => peakRfB1TeslaForAngle(event.angle, event.end - event.start)),
+  );
+  const peakMicrotesla = peakTesla * 1e6;
+  drawSignalChart({
+    canvas: outputs.rfChart,
+    localTime,
+    sequence,
+    loop,
+    valueAt: (time, chartSequence) => rfB1At(time, chartSequence) * 1e6,
+    range: [-peakMicrotesla, peakMicrotesla],
+    color: state.sliceGradientEnabled ? '#d79cff' : '#ef6b53',
+    labels: [`+${peakMicrotesla.toFixed(1)}`, '0', `-${peakMicrotesla.toFixed(1)}`],
+    baselineValue: 0,
+    fillColor: state.sliceGradientEnabled ? 'rgba(184, 92, 255, 0.24)' : 'rgba(193, 63, 50, 0.28)',
+    steps: 800,
+    padLeft: 36,
+  });
+}
+
+function drawSsgChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
+  const gradientLimit = Math.max(1, state.sliceGradientMtM);
+  drawSignalChart({
+    canvas: outputs.ssgChart,
+    localTime,
+    sequence,
+    loop,
+    valueAt: sliceGradientAt,
+    range: [-gradientLimit, gradientLimit],
+    color: '#d79cff',
+    labels: [`+${gradientLimit.toFixed(1)}`, '0', `-${gradientLimit.toFixed(1)}`],
+    baselineValue: 0,
+    fillColor: 'rgba(184, 92, 255, 0.3)',
+    steps: 600,
+    padLeft: 34,
+  });
+}
+
 function drawMxyChart(localTime, sequence, loop = normalizeLoopRange(sequence)) {
   drawSignalChart({
     canvas: outputs.mxyChart,
@@ -598,6 +890,10 @@ function drawSignalChart({
   range,
   color,
   labels,
+  baselineValue = null,
+  fillColor = null,
+  steps = 150,
+  padLeft = 28,
 }) {
   const rect = canvas.getBoundingClientRect();
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -616,9 +912,14 @@ function drawSignalChart({
 
   const viewWidth = width / pixelRatio;
   const viewHeight = height / pixelRatio;
-  const pad = { left: 28, right: 10, top: 10, bottom: 16 };
+  const pad = { left: padLeft, right: 10, top: 10, bottom: 16 };
   const plotWidth = viewWidth - pad.left - pad.right;
   const plotHeight = viewHeight - pad.top - pad.bottom;
+  const [minValue, maxValue] = range;
+  const valueToY = (value) => {
+    const normalized = (clamp(value, minValue, maxValue) - minValue) / (maxValue - minValue);
+    return pad.top + plotHeight * (1 - normalized);
+  };
 
   ctx.strokeStyle = 'rgba(228, 235, 229, 0.16)';
   ctx.lineWidth = 1;
@@ -643,17 +944,41 @@ function drawSignalChart({
     }
   }
 
-  const [minValue, maxValue] = range;
+  if (baselineValue !== null) {
+    const baselineY = valueToY(baselineValue);
+    ctx.strokeStyle = 'rgba(228, 235, 229, 0.36)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, baselineY);
+    ctx.lineTo(viewWidth - pad.right, baselineY);
+    ctx.stroke();
+  }
+
+  if (fillColor && baselineValue !== null) {
+    const baselineY = valueToY(baselineValue);
+    ctx.fillStyle = fillColor;
+    for (let i = 0; i < steps; i += 1) {
+      const time = loop.start + (loop.span * (i + 0.5)) / steps;
+      const value = valueAt(time, sequence);
+      if (Math.abs(value - baselineValue) < 1e-8) {
+        continue;
+      }
+
+      const x = pad.left + (plotWidth * i) / steps;
+      const nextX = pad.left + (plotWidth * (i + 1)) / steps;
+      const y = valueToY(value);
+      ctx.fillRect(x, Math.min(y, baselineY), Math.max(1, nextX - x + 0.5), Math.abs(baselineY - y));
+    }
+  }
+
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  const steps = 150;
   for (let i = 0; i <= steps; i += 1) {
     const time = loop.start + (loop.span * i) / steps;
     const value = valueAt(time, sequence);
-    const normalized = (clamp(value, minValue, maxValue) - minValue) / (maxValue - minValue);
     const x = pad.left + (plotWidth * i) / steps;
-    const y = pad.top + plotHeight * (1 - normalized);
+    const y = valueToY(value);
     if (i === 0) {
       ctx.moveTo(x, y);
     } else {
@@ -706,7 +1031,7 @@ function rebuildPhantom() {
           continue;
         }
 
-        const threePosition = toThreePosition(x, y, z).multiplyScalar(1.35);
+        const threePosition = toThreePosition(x, y, z).multiplyScalar(PHANTOM_SCENE_SCALE);
         const phaseOffset = Math.PI * 2 * positiveModulo(0.37 * x - 0.21 * y + 0.13 * z + rho * 0.19, 1);
         const offResBase = 0.62 * x - 0.48 * y + 0.32 * z + (rho - 0.35) * 0.42;
         const t1Scale = phantomSample.t1Scale;
@@ -725,7 +1050,7 @@ function rebuildPhantom() {
         });
 
         positions.push(threePosition.x, threePosition.y, threePosition.z);
-        const baseColor = tissueColor(rho);
+        const baseColor = sampleDisplayColor(samples[samples.length - 1]);
         colors.push(baseColor.r, baseColor.g, baseColor.b);
       }
     }
@@ -746,6 +1071,7 @@ function rebuildPhantom() {
   phantomGroup.add(phantomPoints);
 
   createVectorMesh();
+  updateSliceVisual();
 
   outputs.samples.textContent = samples.length.toString();
   window.__mrDemoReady = true;
@@ -778,6 +1104,19 @@ function disposePhantom() {
   }
 
   disposeVectorMesh();
+}
+
+function updatePhantomSliceColors() {
+  if (!phantomPoints) {
+    return;
+  }
+
+  const colorAttribute = phantomPoints.geometry.getAttribute('color');
+  for (let i = 0; i < samples.length; i += 1) {
+    const color = sampleDisplayColor(samples[i]);
+    colorAttribute.setXYZ(i, color.r, color.g, color.b);
+  }
+  colorAttribute.needsUpdate = true;
 }
 
 function disposeVectorMesh() {
@@ -827,6 +1166,82 @@ function buildB0Field() {
   fieldGroup.add(labelSprite('B0 field', new THREE.Vector3(1.58, 1.32, 1.25), '#8bc1ff'));
 }
 
+function updateSliceVisual() {
+  clearGroup(sliceGroup);
+  sliceMaterials.length = 0;
+
+  if (!state.sliceGradientEnabled) {
+    updateVisibility();
+    return;
+  }
+
+  const thicknessScene = clamp(sliceThicknessMm() * PHANTOM_SCENE_SCALE / (PHANTOM_FOV_MM * 0.5), 0.035, 2.5);
+  const centerScene = clamp(state.sliceCenterMm * PHANTOM_SCENE_SCALE / (PHANTOM_FOV_MM * 0.5), -1.22, 1.22);
+
+  const slabMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0x84d1c5,
+    emissive: 0x0b4f4a,
+    emissiveIntensity: 0.18,
+    transparent: true,
+    opacity: 0.22,
+    roughness: 0.48,
+    metalness: 0.02,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  sliceMaterials.push(slabMaterial);
+
+  const slabGeometry = new THREE.BoxGeometry(2.55, thicknessScene, 2.55);
+  const slab = new THREE.Mesh(slabGeometry, slabMaterial);
+  slab.position.y = centerScene;
+  slab.renderOrder = 3;
+  sliceGroup.add(slab);
+
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x84d1c5, transparent: true, opacity: 0.72 });
+  sliceMaterials.push(edgeMaterial);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(slabGeometry), edgeMaterial);
+  edges.position.copy(slab.position);
+  edges.renderOrder = 4;
+  sliceGroup.add(edges);
+
+  const arrowCount = 7;
+  for (let i = 0; i < arrowCount; i += 1) {
+    const amount = i / (arrowCount - 1);
+    const y = lerp(-1.18, 1.18, amount);
+    const arrowLength = 0.32 + amount * 0.42;
+    const helper = new THREE.ArrowHelper(
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(-1.78, y - arrowLength * 0.5, 1.48),
+      arrowLength,
+      0xcd6df5,
+      0.12,
+      0.055,
+    );
+    helper.line.material.transparent = true;
+    helper.line.material.opacity = 0.62;
+    helper.cone.material.transparent = true;
+    helper.cone.material.opacity = 0.86;
+    sliceGroup.add(helper);
+  }
+
+  sliceGroup.add(labelSprite('Gz slice select', new THREE.Vector3(-1.95, 1.38, 1.48), '#d79cff'));
+  updateVisibility();
+}
+
+function clearGroup(group) {
+  while (group.children.length > 0) {
+    const child = group.children.pop();
+    child.traverse?.((object) => {
+      object.geometry?.dispose?.();
+      if (Array.isArray(object.material)) {
+        object.material.forEach((material) => material.dispose?.());
+      } else {
+        object.material?.dispose?.();
+      }
+    });
+  }
+}
+
 function buildCoil() {
   const copper = new THREE.MeshStandardMaterial({
     color: 0xd7843b,
@@ -870,9 +1285,8 @@ function buildCoil() {
 }
 
 function updateCoil(localTime, sequence) {
-  const active = timelineEvents(sequence).some((event) => (
-    event.kind === 'rf'
-    && localTime >= event.start
+  const active = rfPulseEvents(sequence).some((event) => (
+    localTime >= event.start
     && localTime <= event.end
   )) || (sequence.type === 'spin-echo'
     && localTime >= sequence.readoutStart
@@ -900,11 +1314,11 @@ function applySequenceSettings() {
 
   outputs.sequenceReadout.textContent = sequence.name;
   if (sequence.type === 'spin-echo') {
-    outputs.phaseLabelA.textContent = '90 deg RF';
-    outputs.phaseLabelB.textContent = '180 deg refocus / echo';
+    outputs.phaseLabelA.textContent = state.sliceGradientEnabled ? '90 deg RF + Gz' : '90 deg RF';
+    outputs.phaseLabelB.textContent = state.sliceGradientEnabled ? '180 deg RF + Gz / echo' : '180 deg refocus / echo';
     outputs.phaseLabelC.textContent = 'Readout';
   } else {
-    outputs.phaseLabelA.textContent = 'RF pulse';
+    outputs.phaseLabelA.textContent = state.sliceGradientEnabled ? 'RF pulse + Gz' : 'RF pulse';
     outputs.phaseLabelB.textContent = state.referenceFrame === 'laboratory'
       ? 'Larmor precession under B0'
       : 'Rotating-frame off-resonance';
@@ -937,6 +1351,18 @@ function updateFieldOutputs() {
   outputs.b0.textContent = `${state.b0Tesla.toFixed(2)} T`;
   outputs.larmor.textContent = formatFrequency(larmorFrequencyHz());
   outputs.larmorPeriod.textContent = formatSimulationTime(larmorPeriodSeconds());
+}
+
+function updateSliceSelectionOutputs() {
+  outputs.sliceCenter.textContent = `${Math.round(state.sliceCenterMm)} mm`;
+  outputs.sliceGradient.textContent = `${state.sliceGradientMtM.toFixed(1)} mT/m`;
+  outputs.rfBandwidth.textContent = `${state.rfBandwidthKhz.toFixed(1)} kHz`;
+  outputs.sliceThickness.textContent = state.sliceGradientEnabled ? `${Math.round(sliceThicknessMm())} mm` : 'Off';
+  outputs.rfMode.textContent = rfModeLabel();
+  outputs.rfCenter.textContent = formatFrequency(rfCenterFrequencyHz());
+  outputs.rfPeakB1.textContent = formatB1Microtesla(peakRfB1TeslaForAngle(state.flipAngle, rfPulseSecondsForAngle(state.flipAngle)));
+  const tbw = rfTimeBandwidthProduct(rfPulseSecondsForAngle(state.flipAngle));
+  outputs.rfTbw.textContent = tbw === null ? '-' : tbw.toFixed(1);
 }
 
 function renderTimeline(sequence) {
@@ -1015,16 +1441,12 @@ function updateLoopReadouts(sequence, loop = normalizeLoopRange(sequence)) {
 function timelineEvents(sequence) {
   if (sequence.type === 'spin-echo') {
     return [
-      { kind: 'rf', label: '90 deg RF', start: 0, end: sequence.rf90Seconds },
-      { kind: 'refocus', label: '180 deg refocusing RF', start: sequence.refocusStart, end: sequence.refocusEnd },
       { kind: 'readout', label: 'Readout window', start: sequence.readoutStart, end: sequence.readoutEnd },
       { marker: true, label: 'Echo time', time: sequence.echoTime, color: '#84d1c5' },
     ];
   }
 
-  return [
-    { kind: 'rf', label: 'RF pulse', start: 0, end: sequence.rf90Seconds },
-  ];
+  return [];
 }
 
 function bindLoopControls() {
@@ -1111,6 +1533,60 @@ function bindLoopControls() {
       refocusEnd: sequence.refocusEnd,
     };
   };
+
+  window.__mrDemoGetSliceProbe = () => {
+    const profiles = samples.map((sample) => sliceSelectionProfile(sample));
+    const sequence = getSequenceConfig();
+    return {
+      enabled: state.sliceGradientEnabled,
+      centerMm: state.sliceCenterMm,
+      gradientMtM: state.sliceGradientMtM,
+      bandwidthKhz: state.rfBandwidthKhz,
+      thicknessMm: sliceThicknessMm(),
+      waveform: sliceGradientWaveform(sequence),
+      ssgDuringRf: sliceGradientAt(sequence.rf90Seconds / 2, sequence),
+      ssgRephase: sliceGradientAt(sequence.rf90Seconds * 1.25, sequence),
+      ssgDuringRefocus: sequence.type === 'spin-echo'
+        ? sliceGradientAt(sequence.refocusCenter, sequence)
+        : null,
+      maxProfile: Math.max(...profiles),
+      minProfile: Math.min(...profiles),
+      activeSamples: profiles.filter((profile) => profile > 0.5).length,
+      inactiveSamples: profiles.filter((profile) => profile < 0.05).length,
+    };
+  };
+
+  window.__mrDemoGetRfProbe = () => {
+    const sequence = getSequenceConfig();
+    const pulses = rfPulseEvents(sequence).map((pulse) => {
+      const duration = pulse.end - pulse.start;
+      const peakTesla = peakRfB1TeslaForAngle(pulse.angle, duration);
+      const centerValue = rfPulseB1TeslaAt(duration / 2, duration, pulse.angle);
+      const earlyValue = rfPulseB1TeslaAt(duration * 0.1, duration, pulse.angle);
+      return {
+        ...pulse,
+        duration,
+        peakTesla,
+        centerValue,
+        earlyValue,
+        tbw: rfTimeBandwidthProduct(duration),
+        integral: integrateRfPulseShape(duration),
+      };
+    });
+
+    return {
+      mode: rfModeLabel(),
+      sliceGradientEnabled: state.sliceGradientEnabled,
+      carrierHz: rfCenterFrequencyHz(),
+      gammaRadT: PROTON_GYROMAGNETIC_RATIO_RAD_T,
+      pulses,
+      chartReadout: outputs.chartRf.textContent,
+      modeReadout: outputs.rfMode.textContent,
+      centerReadout: outputs.rfCenter.textContent,
+      peakReadout: outputs.rfPeakB1.textContent,
+      tbwReadout: outputs.rfTbw.textContent,
+    };
+  };
 }
 
 function beginLoopDrag(event, handle) {
@@ -1193,6 +1669,7 @@ function bindUi() {
   controlsUi.flipAngle.addEventListener('input', () => {
     state.flipAngle = Number(controlsUi.flipAngle.value);
     outputs.flip.textContent = `${state.flipAngle} deg`;
+    updateSliceSelectionOutputs();
     applySequenceSettings();
   });
 
@@ -1212,12 +1689,45 @@ function bindUi() {
   controlsUi.b0Rate.addEventListener('input', () => {
     state.b0Tesla = Number(controlsUi.b0Rate.value);
     updateFieldOutputs();
+    updateSliceSelectionOutputs();
     updateMoments();
   });
 
   controlsUi.offRes.addEventListener('input', () => {
     state.offRes = Number(controlsUi.offRes.value);
     outputs.off.textContent = `${state.offRes.toFixed(2)} Hz`;
+    updateMoments();
+  });
+
+  controlsUi.sliceGradientEnabled.addEventListener('change', () => {
+    state.sliceGradientEnabled = controlsUi.sliceGradientEnabled.checked;
+    updateSliceSelectionOutputs();
+    updateSliceVisual();
+    updatePhantomSliceColors();
+    applySequenceSettings();
+  });
+
+  controlsUi.sliceCenter.addEventListener('input', () => {
+    state.sliceCenterMm = Number(controlsUi.sliceCenter.value);
+    updateSliceSelectionOutputs();
+    updateSliceVisual();
+    updatePhantomSliceColors();
+    updateMoments();
+  });
+
+  controlsUi.sliceGradient.addEventListener('input', () => {
+    state.sliceGradientMtM = Number(controlsUi.sliceGradient.value);
+    updateSliceSelectionOutputs();
+    updateSliceVisual();
+    updatePhantomSliceColors();
+    updateMoments();
+  });
+
+  controlsUi.rfBandwidth.addEventListener('input', () => {
+    state.rfBandwidthKhz = Number(controlsUi.rfBandwidth.value);
+    updateSliceSelectionOutputs();
+    updateSliceVisual();
+    updatePhantomSliceColors();
     updateMoments();
   });
 
@@ -1270,7 +1780,7 @@ function bindUi() {
     rebuildPhantom();
   });
 
-  [controlsUi.showPhantom, controlsUi.showVectors, controlsUi.showNet, controlsUi.showField, controlsUi.showCoil].forEach((input) => {
+  [controlsUi.showPhantom, controlsUi.showVectors, controlsUi.showNet, controlsUi.showField, controlsUi.showCoil, controlsUi.showSlice].forEach((input) => {
     input.addEventListener('change', updateVisibility);
   });
 
@@ -1284,6 +1794,7 @@ function updateVisibility() {
   netArrow.visible = controlsUi.showNet.checked;
   fieldGroup.visible = controlsUi.showField.checked;
   coilGroup.visible = controlsUi.showCoil.checked;
+  sliceGroup.visible = controlsUi.showSlice.checked && state.sliceGradientEnabled;
 }
 
 function resize() {
@@ -1385,6 +1896,17 @@ function tissueColor(rho) {
   return c.setHSL(0.01, 0.7, 0.66);
 }
 
+function sampleDisplayColor(sample) {
+  const color = tissueColor(sample.rho);
+  if (!state.sliceGradientEnabled) {
+    return color;
+  }
+
+  const profile = sliceSelectionProfile(sample);
+  const outside = new THREE.Color(0x25312d);
+  return outside.lerp(color, 0.22 + 0.78 * profile);
+}
+
 function toThreePosition(x, y, z) {
   return new THREE.Vector3(x, z, y);
 }
@@ -1459,6 +1981,14 @@ function formatFrequency(hz) {
   return `${hz.toFixed(2)} Hz`;
 }
 
+function formatB1Microtesla(tesla) {
+  const microtesla = tesla * 1e6;
+  if (Math.abs(microtesla) < 0.01) {
+    return `${(tesla * 1e9).toFixed(1)} nT`;
+  }
+  return `${microtesla.toFixed(2)} uT`;
+}
+
 function speedFromSlider(sliderValue) {
   return 10 ** clamp(sliderValue, SPEED_SLIDER_MIN, SPEED_SLIDER_MAX);
 }
@@ -1524,5 +2054,6 @@ bindUi();
 resize();
 updateRelaxationOutputs();
 updateFieldOutputs();
+updateSliceSelectionOutputs();
 applySequenceSettings();
 requestAnimationFrame(animate);

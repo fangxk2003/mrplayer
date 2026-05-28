@@ -81,6 +81,34 @@
             <span>Off-resonance spread <output id="offValue">0.45 Hz</output></span>
             <input id="offRes" type="range" min="0" max="1.2" step="0.05" value="0.45" />
           </label>
+          <label class="check-row">
+            <input id="sliceGradientEnabled" type="checkbox" checked />
+            <span>Slice-select gradient</span>
+          </label>
+          <label class="control">
+            <span>Slice center <output id="sliceCenterValue">0 mm</output></span>
+            <input id="sliceCenter" type="range" min="-90" max="90" step="2" value="0" />
+          </label>
+          <label class="control">
+            <span>Slice Gz <output id="sliceGradientValue">3.0 mT/m</output></span>
+            <input id="sliceGradient" type="range" min="1" max="30" step="0.5" value="3" />
+          </label>
+          <label class="control">
+            <span>RF bandwidth <output id="rfBandwidthValue">5.0 kHz</output></span>
+            <input id="rfBandwidth" type="range" min="1" max="12" step="0.5" value="5" />
+            <div class="control-readout">
+              <span>Selected thickness</span>
+              <strong id="sliceThicknessValue">39 mm</strong>
+              <span>RF mode</span>
+              <strong id="rfModeValue">Windowed sinc</strong>
+              <span>RF center</span>
+              <strong id="rfCenterValue">63.87 MHz</strong>
+              <span>90 peak B1</span>
+              <strong id="rfPeakB1Value">0.00 uT</strong>
+              <span>90 TBW</span>
+              <strong id="rfTbwValue">15.0</strong>
+            </div>
+          </label>
         </section>
 
         <section class="control-section" aria-labelledby="tissue-title">
@@ -152,6 +180,10 @@
             <input id="showCoil" type="checkbox" checked />
             <span>RF / receive coil</span>
           </label>
+          <label class="check-row">
+            <input id="showSlice" type="checkbox" checked />
+            <span>Slice slab / Gz</span>
+          </label>
         </section>
       </aside>
 
@@ -201,6 +233,20 @@
             <span>End <strong id="loopEndReadout">80 ms</strong></span>
             <span>Zoom <strong id="zoomReadout">37.5x</strong></span>
           </div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-title">
+            <span>RF B1(t)</span>
+            <strong id="chartRfReadout">0.00 uT</strong>
+          </div>
+          <canvas id="rfChart" class="signal-chart rf-chart" width="900" height="90" aria-label="RF B1 waveform chart"></canvas>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-title">
+            <span>SSG / slice-select gradient</span>
+            <strong id="chartSsgReadout">0.0 mT/m</strong>
+          </div>
+          <canvas id="ssgChart" class="signal-chart gradient-chart" width="900" height="90" aria-label="Slice-select gradient waveform chart"></canvas>
         </div>
         <div class="chart-panel">
           <div class="chart-title">
