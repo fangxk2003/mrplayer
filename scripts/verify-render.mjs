@@ -173,9 +173,11 @@ for (const check of checks) {
             loopEnd: window.__mrDemoStats?.loopEnd,
             cycleSeconds: window.__mrDemoStats?.cycleSeconds,
             rf90Seconds: window.__mrDemoStats?.rf90Seconds,
+            rf90Center: window.__mrDemoStats?.rf90Center,
             refocusSeconds: window.__mrDemoStats?.refocusSeconds,
             refocusCenter: window.__mrDemoStats?.refocusCenter,
             echoTime: window.__mrDemoStats?.echoTime,
+            echoDelaySeconds: window.__mrDemoStats?.echoDelaySeconds,
             hasLoopControls: Boolean(document.querySelector('#loopStrip') && document.querySelector('#loopStartHandle') && document.querySelector('#loopEndHandle')),
             spinEchoControlsHidden: [...document.querySelectorAll('.spin-echo-only')].every((item) => item.hidden),
             eventZones: document.querySelectorAll('.event-zone').length,
@@ -452,6 +454,7 @@ for (const check of checks) {
   })()`);
   const sliceResults = await evaluate(cdp, `(() => {
     const sequence = document.querySelector('#sequenceType');
+    const frame = document.querySelector('#referenceFrame');
     const enable = document.querySelector('#sliceGradientEnabled');
     const center = document.querySelector('#sliceCenter');
     const gradient = document.querySelector('#sliceGradient');
@@ -463,11 +466,28 @@ for (const check of checks) {
     const showSlice = document.querySelector('#showSlice');
     const showSliceVectorsOnly = document.querySelector('#showSliceVectorsOnly');
     const probe = window.__mrDemoGetSliceProbe;
+    const phaseProbe = window.__mrDemoGetSlicePhaseProbe;
     const spinEchoProbe = window.__mrDemoGetSpinEchoProbe;
 
-    if (!sequence || !enable || !center || !gradient || !bandwidth || !showSliceVectorsOnly || typeof probe !== 'function' || typeof spinEchoProbe !== 'function') {
+    if (!sequence || !frame || !enable || !center || !gradient || !bandwidth || !showSliceVectorsOnly || typeof probe !== 'function' || typeof phaseProbe !== 'function' || typeof spinEchoProbe !== 'function') {
       return { ok: false, reason: 'Missing slice selection controls' };
     }
+
+    sequence.value = 'single-pulse';
+    sequence.dispatchEvent(new Event('change', { bubbles: true }));
+    frame.value = 'rotating';
+    frame.dispatchEvent(new Event('change', { bubbles: true }));
+    enable.checked = true;
+    enable.dispatchEvent(new Event('change', { bubbles: true }));
+    center.value = '0';
+    center.dispatchEvent(new Event('input', { bubbles: true }));
+    gradient.value = '5';
+    gradient.dispatchEvent(new Event('input', { bubbles: true }));
+    bandwidth.value = '2';
+    bandwidth.dispatchEvent(new Event('input', { bubbles: true }));
+    const phaseResult = phaseProbe(0.0016);
+    const phaseAfterRephaseResult = phaseProbe(0.0045);
+    const singlePulseProbe = probe();
 
     sequence.value = 'spin-echo';
     sequence.dispatchEvent(new Event('change', { bubbles: true }));
@@ -526,6 +546,9 @@ for (const check of checks) {
       thicknessReadout: thicknessReadout?.textContent || '',
       showSliceChecked: Boolean(showSlice?.checked),
       showSliceVectorsOnlyChecked: Boolean(showSliceVectorsOnly?.checked),
+      phaseResult,
+      phaseAfterRephaseResult,
+      singlePulseProbe,
       enabledProbe,
       outsideMomentProbe,
       disabledProbe,
@@ -684,6 +707,38 @@ for (const check of checks) {
 await cdp.send('Page.close').catch(() => {});
 cdp.close();
 
+function momentComponent(moment, key) {
+  return Number(moment?.[key]);
+}
+
+function transverseLength(moment) {
+  const mx = momentComponent(moment, 'mx');
+  const my = momentComponent(moment, 'my');
+  return Number.isFinite(mx) && Number.isFinite(my) ? Math.hypot(mx, my) : NaN;
+}
+
+function hasFiniteRfDetuningResponse(phaseResult, minimumPhaseDegrees) {
+  const top = phaseResult?.topMoment;
+  const bottom = phaseResult?.bottomMoment;
+  const topMx = momentComponent(top, 'mx');
+  const topMy = momentComponent(top, 'my');
+  const topMz = momentComponent(top, 'mz');
+  const bottomMx = momentComponent(bottom, 'mx');
+  const bottomMy = momentComponent(bottom, 'my');
+  const bottomMz = momentComponent(bottom, 'mz');
+  const phaseDifference = Math.abs(Number(phaseResult?.momentPhaseDifferenceDegrees));
+
+  return Number.isFinite(phaseDifference)
+    && phaseDifference > minimumPhaseDegrees
+    && transverseLength(top) > 0.05
+    && transverseLength(bottom) > 0.05
+    && Math.abs(topMx - bottomMx) < 0.002
+    && Math.abs(topMy + bottomMy) < 0.002
+    && Math.abs(topMz - bottomMz) < 0.002
+    && topMz < 0.98
+    && bottomMz < 0.98;
+}
+
 const failed = results.filter((result) => {
   const stats = result.stats;
   return !stats.ok
@@ -710,7 +765,9 @@ const failed = results.filter((result) => {
       || Math.abs(sequence.rf90Seconds - 0.003) > 0.00001
       || (sequence.sequence === 'spin-echo' && (
         Math.abs(sequence.refocusSeconds - 0.006) > 0.00001
-        || Math.abs(sequence.refocusCenter - sequence.echoTime / 2) > 0.00001
+        || Math.abs(sequence.rf90Center - sequence.rf90Seconds / 2) > 0.00001
+        || Math.abs(sequence.echoTime - (sequence.rf90Center + sequence.echoDelaySeconds)) > 0.00001
+        || Math.abs(sequence.refocusCenter - (sequence.rf90Center + sequence.echoDelaySeconds / 2)) > 0.00001
       ))
       || !sequence.coilToggle
       || !sequence.rfChart.ok
@@ -829,14 +886,16 @@ const failed = results.filter((result) => {
     || result.rfResults.hard.pulses.length !== 1
     || Math.abs(result.rfResults.hard.pulses[0].peakTesla - (Math.PI / 2) / (2 * Math.PI * 42577478.92 * 0.003)) > 1e-10
     || result.rfResults.hard.pulses[0].tbw !== null
-    || result.rfResults.sinc.mode !== 'Windowed sinc'
+    || result.rfResults.sinc.mode !== 'Sinc RF pulse'
     || result.rfResults.sinc.sliceGradientEnabled !== true
     || result.rfResults.sinc.pulses.length !== 2
     || Math.abs(result.rfResults.sinc.pulses[0].tbw - 12) > 0.000001
     || Math.abs(result.rfResults.sinc.pulses[1].tbw - 24) > 0.000001
+    || Math.abs(result.rfResults.sinc.pulses[0].peakTesla - ((Math.PI / 2) * 4000) / (2 * Math.PI * 42577478.92)) > 1e-10
+    || Math.abs(result.rfResults.sinc.pulses[1].peakTesla - (Math.PI * 4000) / (2 * Math.PI * 42577478.92)) > 1e-10
     || result.rfResults.sinc.pulses[0].peakTesla <= result.rfResults.hard.pulses[0].peakTesla
     || Math.abs(result.rfResults.sinc.carrierHz - (63866218.38 + 42577478.92 * 0.005 * 0.02)) > 2
-    || result.rfResults.modeReadout !== 'Windowed sinc'
+    || result.rfResults.modeReadout !== 'Sinc RF pulse'
     || result.rfResults.tbwReadout !== '12.0'
     || !result.rfResults.peakReadout.endsWith('uT')
     || !result.rfResults.chartReadout.endsWith('T')
@@ -857,12 +916,26 @@ const failed = results.filter((result) => {
     || Math.abs(result.sliceResults.enabledProbe.centerMm - 20) > 0.000001
     || Math.abs(result.sliceResults.enabledProbe.gradientMtM - 5) > 0.000001
     || Math.abs(result.sliceResults.enabledProbe.bandwidthKhz - 4) > 0.000001
+    || Math.abs(result.sliceResults.phaseResult.bandwidthHz - 2000) > 0.000001
+    || Math.abs(result.sliceResults.phaseResult.elapsedGradientSeconds - 0.0001) > 1e-12
+    || Math.abs(result.sliceResults.phaseResult.expectedDegrees - 72) > 0.000001
+    || Math.abs(result.sliceResults.phaseResult.offsetDifferenceHz - 2000) > 0.001
+    || Math.abs(result.sliceResults.phaseResult.gradientPhaseDifferenceDegrees - 72) > 0.001
+    || !hasFiniteRfDetuningResponse(result.sliceResults.phaseResult, 20)
+    || Math.abs(result.sliceResults.phaseAfterRephaseResult.elapsedGradientSeconds) > 1e-12
+    || Math.abs(result.sliceResults.phaseAfterRephaseResult.expectedDegrees) > 0.000001
+    || Math.abs(result.sliceResults.phaseAfterRephaseResult.gradientPhaseDifferenceDegrees) > 0.001
+    || !hasFiniteRfDetuningResponse(result.sliceResults.phaseAfterRephaseResult, 15)
+    || Math.abs(result.sliceResults.singlePulseProbe.excitationAreaSeconds - 0.003) > 1e-12
+    || Math.abs(result.sliceResults.singlePulseProbe.firstRephaseAreaSeconds + 0.0015) > 1e-12
+    || Math.abs(result.sliceResults.singlePulseProbe.firstNetAreaSeconds - 0.0015) > 1e-12
+    || Math.abs(result.sliceResults.singlePulseProbe.firstEffectiveNetAreaSeconds) > 1e-12
     || Math.abs(result.sliceResults.enabledProbe.thicknessMm - (4000 / (42577478.92 * 0.005) * 1000)) > 0.01
     || result.sliceResults.enabledProbe.maxProfile < 0.5
     || result.sliceResults.enabledProbe.inactiveSamples <= 0
     || result.sliceResults.enabledProbe.activeSamples <= 0
     || result.sliceResults.outsideMomentProbe.outsideProfile >= 0.01
-    || Math.abs(result.sliceResults.outsideMomentProbe.outsideBefore.mz - 1) > 0.000001
+    || Math.abs(result.sliceResults.outsideMomentProbe.outsideBefore.mz - 1) > 0.00001
     || Math.abs(result.sliceResults.outsideMomentProbe.outsideAfter.mz - 1) > 0.00001
     || result.sliceResults.outsideMomentProbe.outsideAfterLength < 0.999
     || result.sliceResults.disabledProbe.enabled

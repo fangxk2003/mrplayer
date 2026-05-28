@@ -174,6 +174,7 @@ const PROTON_GYROMAGNETIC_RATIO_RAD_T = TAU * PROTON_GYROMAGNETIC_RATIO_HZ_T;
 const RF_90_SECONDS = 0.003;
 const RF_EPSILON_SECONDS = 0.0001;
 const RF_INTEGRATION_STEPS = 2048;
+const RF_BLOCH_STEPS = 96;
 const SPEED_SLIDER_MIN = -9;
 const SPEED_SLIDER_MAX = 0.5;
 const PHANTOM_FOV_MM = 220;
@@ -284,9 +285,11 @@ function updateMoments(sequence = getSequenceConfig()) {
     localTime,
     cycleSeconds: sequence.cycleSeconds,
     rf90Seconds: sequence.rf90Seconds,
+    rf90Center: sequence.rf90Center,
     refocusSeconds: sequence.refocusSeconds || 0,
     refocusCenter: sequence.refocusCenter || null,
     echoTime: sequence.echoTime || null,
+    echoDelaySeconds: sequence.echoDelaySeconds || null,
     b0Tesla: state.b0Tesla,
     larmorHz: larmorFrequencyHz(),
     larmorPeriodSeconds: larmorPeriodSeconds(),
@@ -315,22 +318,27 @@ function updateMoments(sequence = getSequenceConfig()) {
 }
 
 function getSequenceConfig() {
+  const rf90Seconds = rfPulseSecondsForAngle(state.flipAngle);
+  const rf90Center = rf90Seconds / 2;
+
   if (state.sequence === 'spin-echo') {
-    const rf90Seconds = rfPulseSecondsForAngle(state.flipAngle);
     const refocusSeconds = rfPulseSecondsForAngle(state.refocusAngle);
-    const echoTime = state.echoTime;
-    const refocusCenter = echoTime / 2;
+    const echoDelaySeconds = state.echoTime;
+    const echoTime = rf90Center + echoDelaySeconds;
+    const refocusCenter = rf90Center + echoDelaySeconds / 2;
     const readoutSeconds = 0.07;
     return {
       type: 'spin-echo',
       name: 'Spin Echo',
       cycleSeconds: Math.max(3, echoTime + 1.4),
       rf90Seconds,
+      rf90Center,
       refocusSeconds,
       refocusCenter,
       refocusStart: refocusCenter - refocusSeconds / 2,
       refocusEnd: refocusCenter + refocusSeconds / 2,
       echoTime,
+      echoDelaySeconds,
       readoutStart: echoTime - readoutSeconds / 2,
       readoutEnd: echoTime + readoutSeconds / 2,
     };
@@ -340,7 +348,8 @@ function getSequenceConfig() {
     type: 'single-pulse',
     name: 'Single RF pulse',
     cycleSeconds: 3,
-    rf90Seconds: rfPulseSecondsForAngle(state.flipAngle),
+    rf90Seconds,
+    rf90Center,
   };
 }
 
@@ -422,95 +431,192 @@ function getMomentAt(sample, localTime, sequence) {
 }
 
 function getSinglePulseMoment(sample, localTime, sequence) {
-  const profile = sliceSelectionProfile(sample);
-  const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
-  const pulseProgress = clamp(localTime / rfSeconds, 0, 1);
-  const rfEase = smoothstep(pulseProgress);
-  const flip = degToRad(state.flipAngle) * profile;
-  const freeTime = Math.max(0, localTime - sequence.rf90Seconds);
-  const inPulse = localTime < sequence.rf90Seconds;
-  const theta = inPulse ? flip * rfEase : flip;
-  const transverseStart = Math.sin(theta);
-  const mzDuringPulse = Math.cos(theta);
-  const postPulseMz = Math.cos(flip);
-  const localT1 = (state.t1Ms / 1000) * sample.t1Scale;
-  const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
-  const t2Decay = Math.exp(-freeTime / localT2);
-  const transverse = transverseStart * t2Decay;
-  const mz = inPulse
-    ? mzDuringPulse
-    : recoverMz(postPulseMz, freeTime, localT1);
-  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * freeTime;
-  const phase = sample.phaseOffset + TAU * positiveModulo(phaseCycles, 1);
+  const [pulse] = rfPulseEvents(sequence);
+  if (localTime <= pulse.end) {
+    return finalizeMoment(simulateRfPulseVector(sample, pulse, localTime, equilibriumMoment()), localTime);
+  }
 
-  return {
-    mx: transverse * Math.cos(phase),
-    my: transverse * Math.sin(phase),
-    mz,
-    phase,
-  };
+  const pulseEndVector = getExcitationEndVector(sample, sequence);
+  const evolved = freeEvolveVector(pulseEndVector, sample, pulse.end, localTime, sequence);
+  return finalizeMoment(evolved, localTime);
 }
 
 function getSpinEchoMoment(sample, localTime, sequence) {
-  const profile = sliceSelectionProfile(sample);
-  const flip = degToRad(state.flipAngle) * profile;
-  const refocus = degToRad(state.refocusAngle) * profile;
-  const t1Seconds = (state.t1Ms / 1000) * sample.t1Scale;
-  const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
-  const localT2Inhom = t2InhomSeconds();
-  const rfSeconds = Math.max(sequence.rf90Seconds, RF_EPSILON_SECONDS);
-  const refocusSeconds = Math.max(sequence.refocusSeconds, RF_EPSILON_SECONDS);
-  const timeSinceExcitation = Math.max(0, localTime - sequence.rf90Seconds);
-  const transverseBase = Math.sin(flip);
-  const echoEnvelope = getSpinEchoEnvelope(localTime, sequence, localT2, localT2Inhom);
-  const refocusing = localTime >= sequence.refocusStart && localTime <= sequence.refocusEnd;
-  const refocused = localTime > sequence.refocusEnd;
-  const refocusScale = refocused ? refocusEfficiency(refocus) : 1;
-  let transverse = transverseBase * echoEnvelope.transverse * refocusScale;
-  let phaseSpreadTime = refocused ? sequence.echoTime - localTime : timeSinceExcitation;
-  let mz;
-
-  if (localTime < sequence.rf90Seconds) {
-    const theta = flip * smoothstep(clamp(localTime / rfSeconds, 0, 1));
-    transverse = Math.sin(theta);
-    mz = Math.cos(theta);
-    phaseSpreadTime = 0;
-  } else if (localTime < sequence.refocusStart) {
-    mz = recoverMz(Math.cos(flip), timeSinceExcitation, t1Seconds);
-  } else if (localTime <= sequence.refocusEnd) {
-    const refocusProgress = smoothstep(clamp((localTime - sequence.refocusStart) / refocusSeconds, 0, 1));
-    const beforeVector = getSpinEchoPreRefocusVector(sample, localTime, sequence, localT2, localT2Inhom, t1Seconds, transverseBase, flip);
-    const flippedVector = rotateVectorTowardNegative(beforeVector, refocus * refocusProgress);
-    return {
-      mx: flippedVector.mx,
-      my: flippedVector.my,
-      mz: flippedVector.mz,
-      phase: Math.atan2(flippedVector.my, flippedVector.mx),
-    };
-  } else {
-    const preRefocusEndVector = getSpinEchoPreRefocusVector(sample, sequence.refocusEnd, sequence, localT2, localT2Inhom, t1Seconds, transverseBase, flip);
-    const postRefocusVector = rotateVectorTowardNegative(preRefocusEndVector, refocus);
-    const mzAfterRefocus = postRefocusVector.mz;
-    mz = 1 - (1 - mzAfterRefocus) * Math.exp(-(localTime - sequence.refocusEnd) / t1Seconds);
+  const [excitationPulse, refocusPulse] = rfPulseEvents(sequence);
+  if (localTime <= excitationPulse.end) {
+    return finalizeMoment(simulateRfPulseVector(sample, excitationPulse, localTime, equilibriumMoment()), localTime);
   }
 
-  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * phaseSpreadTime;
-  const phase = TAU * positiveModulo(phaseCycles, 1) + (refocused || refocusing ? Math.PI : 0);
+  const excitationEndVector = getExcitationEndVector(sample, sequence);
+  if (localTime < refocusPulse.start) {
+    const evolved = freeEvolveVector(excitationEndVector, sample, excitationPulse.end, localTime, sequence);
+    return finalizeMoment(evolved, localTime);
+  }
+
+  const refocusStartVector = getRefocusStartVector(sample, sequence);
+  if (localTime <= refocusPulse.end) {
+    return finalizeMoment(simulateRfPulseVector(sample, refocusPulse, localTime, refocusStartVector), localTime);
+  }
+
+  const refocusEndVector = getRefocusEndVector(sample, sequence);
+  const evolved = freeEvolveVector(refocusEndVector, sample, refocusPulse.end, localTime, sequence);
+  return finalizeMoment(evolved, localTime);
+}
+
+function equilibriumMoment() {
+  return { mx: 0, my: 0, mz: 1 };
+}
+
+function cloneMoment(moment) {
+  return { mx: moment.mx, my: moment.my, mz: moment.mz };
+}
+
+function finalizeMoment(vector, localTime) {
+  const displayedPhase = TAU * positiveModulo(displayedMainFieldCycles(localTime), 1);
+  const rotated = rotateTransverse(vector, displayedPhase);
+  return {
+    ...rotated,
+    phase: Math.atan2(rotated.my, rotated.mx),
+  };
+}
+
+function freeEvolveVector(vector, sample, startTime, endTime, sequence) {
+  const elapsed = Math.max(0, endTime - startTime);
+  if (elapsed <= 0) {
+    return cloneMoment(vector);
+  }
+
+  const phaseCycles = state.offRes * sample.offResBase * elapsed
+    + sliceGradientFrequencyOffsetHz(sample) * sliceGradientAreaSeconds(sequence, startTime, endTime);
+  const phase = TAU * positiveModulo(phaseCycles, 1);
+  const localT1 = (state.t1Ms / 1000) * sample.t1Scale;
+  const localT2 = (state.t2Ms / 1000) * sample.t2Scale;
+  const transverseDecay = Math.exp(-elapsed / localT2);
+  const rotated = rotateTransverse(vector, phase);
 
   return {
-    mx: transverse * Math.cos(phase),
-    my: transverse * Math.sin(phase),
-    mz,
-    phase,
+    mx: rotated.mx * transverseDecay,
+    my: rotated.my * transverseDecay,
+    mz: recoverMz(vector.mz, elapsed, localT1),
   };
+}
+
+function rotateTransverse(vector, phase) {
+  const cos = Math.cos(phase);
+  const sin = Math.sin(phase);
+  return {
+    mx: vector.mx * cos - vector.my * sin,
+    my: vector.mx * sin + vector.my * cos,
+    mz: vector.mz,
+  };
+}
+
+function getExcitationEndVector(sample, sequence) {
+  const [pulse] = rfPulseEvents(sequence);
+  return getCachedSampleMoment(sample, `rf90|${rfSimulationCacheKey(sequence)}`, () => (
+    simulateRfPulseVector(sample, pulse, pulse.end, equilibriumMoment())
+  ));
+}
+
+function getRefocusStartVector(sample, sequence) {
+  const [excitationPulse, refocusPulse] = rfPulseEvents(sequence);
+  return getCachedSampleMoment(sample, `pre180|${rfSimulationCacheKey(sequence)}`, () => {
+    const excitationEndVector = getExcitationEndVector(sample, sequence);
+    return freeEvolveVector(excitationEndVector, sample, excitationPulse.end, refocusPulse.start, sequence);
+  });
+}
+
+function getRefocusEndVector(sample, sequence) {
+  const [, refocusPulse] = rfPulseEvents(sequence);
+  return getCachedSampleMoment(sample, `rf180|${rfSimulationCacheKey(sequence)}`, () => {
+    const refocusStartVector = getRefocusStartVector(sample, sequence);
+    return simulateRfPulseVector(sample, refocusPulse, refocusPulse.end, refocusStartVector);
+  });
+}
+
+function getCachedSampleMoment(sample, key, factory) {
+  if (!sample.momentCache) {
+    sample.momentCache = new Map();
+  }
+  if (!sample.momentCache.has(key)) {
+    sample.momentCache.set(key, factory());
+  }
+  return cloneMoment(sample.momentCache.get(key));
+}
+
+function rfSimulationCacheKey(sequence) {
+  return [
+    sequence.type,
+    sequence.rf90Seconds,
+    sequence.refocusStart ?? 0,
+    sequence.refocusEnd ?? 0,
+    state.flipAngle,
+    state.refocusAngle,
+    state.offRes,
+    state.sliceGradientEnabled ? 1 : 0,
+    state.sliceCenterMm,
+    state.sliceGradientMtM,
+    state.rfBandwidthKhz,
+    state.t1Ms,
+    state.t2Ms,
+  ].join('|');
+}
+
+function simulateRfPulseVector(sample, pulse, localTime, initialVector) {
+  const duration = Math.max(RF_EPSILON_SECONDS, pulse.end - pulse.start);
+  const elapsed = clamp(localTime - pulse.start, 0, duration);
+  if (elapsed <= 0) {
+    return cloneMoment(initialVector);
+  }
+
+  const detuningRadSeconds = TAU * rfPulseDetuningHz(sample);
+  const steps = Math.max(1, Math.ceil(RF_BLOCH_STEPS * elapsed / duration));
+  const dt = elapsed / steps;
+  const vector = cloneMoment(initialVector);
+
+  // Rotating-frame Bloch integration: B1 drives the transverse axis while
+  // each sample's offset from the RF carrier precesses around z.
+  for (let i = 0; i < steps; i += 1) {
+    const relativeTime = (i + 0.5) * dt;
+    const b1Tesla = rfPulseB1TeslaAt(relativeTime, duration, pulse.angle);
+    rotateMomentByAngularVelocity(vector, 0, PROTON_GYROMAGNETIC_RATIO_RAD_T * b1Tesla, detuningRadSeconds, dt);
+  }
+
+  return vector;
+}
+
+function rfPulseDetuningHz(sample) {
+  return state.offRes * sample.offResBase + sliceGradientFrequencyOffsetHz(sample);
+}
+
+function rotateMomentByAngularVelocity(vector, wx, wy, wz, dt) {
+  const omega = Math.hypot(wx, wy, wz);
+  if (omega < 1e-12) {
+    return;
+  }
+
+  const ax = wx / omega;
+  const ay = wy / omega;
+  const az = wz / omega;
+  const angle = omega * dt;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const oneMinusCos = 1 - cos;
+  const vx = vector.mx;
+  const vy = vector.my;
+  const vz = vector.mz;
+  const dot = ax * vx + ay * vy + az * vz;
+  const crossX = ay * vz - az * vy;
+  const crossY = az * vx - ax * vz;
+  const crossZ = ax * vy - ay * vx;
+
+  vector.mx = vx * cos + crossX * sin + ax * dot * oneMinusCos;
+  vector.my = vy * cos + crossY * sin + ay * dot * oneMinusCos;
+  vector.mz = vz * cos + crossZ * sin + az * dot * oneMinusCos;
 }
 
 function recoverMz(startMz, elapsedSeconds, t1Seconds = state.t1Ms / 1000) {
   return 1 - (1 - startMz) * Math.exp(-Math.max(0, elapsedSeconds) / t1Seconds);
-}
-
-function refocusEfficiency(refocusRadians) {
-  return Math.sin(refocusRadians / 2) ** 2;
 }
 
 function t2InhomSeconds() {
@@ -542,7 +648,7 @@ function rfCenterFrequencyHz() {
 }
 
 function rfModeLabel() {
-  return state.sliceGradientEnabled ? 'Windowed sinc' : 'Single frequency';
+  return state.sliceGradientEnabled ? 'Sinc RF pulse' : 'Single frequency';
 }
 
 function rfTimeBandwidthProduct(durationSeconds) {
@@ -594,33 +700,28 @@ function rfB1At(time, sequence = getSequenceConfig()) {
 }
 
 function rfPulseB1TeslaAt(relativeTime, durationSeconds, angleDegrees) {
-  const shape = rfPulseShape(relativeTime, durationSeconds);
-  return rfPulseScaleTesla(angleDegrees, durationSeconds) * shape;
+  const flipRadians = degToRad(angleDegrees);
+  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
+
+  if (!state.sliceGradientEnabled) {
+    return flipRadians / (PROTON_GYROMAGNETIC_RATIO_RAD_T * duration);
+  }
+
+  const bandwidthHz = Math.max(0.001, state.rfBandwidthKhz) * 1000;
+  const centeredTime = relativeTime - duration / 2;
+  return (flipRadians * bandwidthHz / PROTON_GYROMAGNETIC_RATIO_RAD_T)
+    * normalizedSinc(bandwidthHz * centeredTime);
 }
 
 function peakRfB1TeslaForAngle(angleDegrees, durationSeconds) {
   const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
-  const scaleTesla = rfPulseScaleTesla(angleDegrees, duration);
-  if (!state.sliceGradientEnabled) {
-    return Math.abs(scaleTesla);
-  }
-
-  let peakShape = 0;
-  for (let i = 0; i <= RF_INTEGRATION_STEPS; i += 1) {
-    const time = (duration * i) / RF_INTEGRATION_STEPS;
-    peakShape = Math.max(peakShape, Math.abs(rfPulseShape(time, duration)));
-  }
-  return Math.abs(scaleTesla) * peakShape;
-}
-
-function rfPulseScaleTesla(angleDegrees, durationSeconds) {
   const flipRadians = degToRad(angleDegrees);
-  const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
-  const shapeIntegral = integrateRfPulseShape(duration);
-  if (Math.abs(shapeIntegral) < 1e-12) {
-    return 0;
+  if (!state.sliceGradientEnabled) {
+    return Math.abs(flipRadians / (PROTON_GYROMAGNETIC_RATIO_RAD_T * duration));
   }
-  return flipRadians / (PROTON_GYROMAGNETIC_RATIO_RAD_T * shapeIntegral);
+
+  const bandwidthHz = Math.max(0.001, state.rfBandwidthKhz) * 1000;
+  return Math.abs(flipRadians * bandwidthHz / PROTON_GYROMAGNETIC_RATIO_RAD_T);
 }
 
 function integrateRfPulseShape(durationSeconds) {
@@ -643,11 +744,9 @@ function rfPulseShape(relativeTime, durationSeconds) {
   }
 
   const duration = Math.max(RF_EPSILON_SECONDS, durationSeconds);
-  const progress = clamp(relativeTime / duration, 0, 1);
   const centeredTime = relativeTime - duration / 2;
   const bandwidthHz = Math.max(0.001, state.rfBandwidthKhz) * 1000;
-  const hamming = 0.54 - 0.46 * Math.cos(TAU * progress);
-  return normalizedSinc(bandwidthHz * centeredTime) * hamming;
+  return normalizedSinc(bandwidthHz * centeredTime);
 }
 
 function normalizedSinc(value) {
@@ -736,57 +835,63 @@ function sliceGradientWaveform(sequence = getSequenceConfig()) {
   return lobes;
 }
 
-function getSpinEchoPreRefocusVector(sample, localTime, sequence, t2Seconds, t2Inhom, t1Seconds, transverseBase, flipRadians) {
-  const envelope = getSpinEchoEnvelope(localTime, sequence, t2Seconds, t2Inhom);
-  const transverse = transverseBase * envelope.transverse;
-  const mz = recoverMz(Math.cos(flipRadians), envelope.timeSinceExcitation, t1Seconds);
-  const phaseCycles = displayedMainFieldCycles(localTime) + state.offRes * sample.offResBase * envelope.timeSinceExcitation;
-  const phase = TAU * positiveModulo(phaseCycles, 1);
-
-  return {
-    mx: transverse * Math.cos(phase),
-    my: transverse * Math.sin(phase),
-    mz,
-    phase,
-  };
-}
-
-function rotateVectorTowardNegative(vector, angle) {
-  const vx = vector.mx;
-  const vy = vector.my;
-  const vz = vector.mz;
-  const magnitude = Math.hypot(vx, vy, vz);
-  if (magnitude < 1e-8) {
-    return { mx: 0, my: 0, mz: 0 };
+function sliceGradientFrequencyOffsetHz(sample) {
+  if (!state.sliceGradientEnabled) {
+    return 0;
   }
 
-  const reference = Math.abs(vz / magnitude) < 0.9
-    ? { x: 0, y: 0, z: 1 }
-    : { x: 1, y: 0, z: 0 };
-  let ax = vy * reference.z - vz * reference.y;
-  let ay = vz * reference.x - vx * reference.z;
-  let az = vx * reference.y - vy * reference.x;
-  const axisLength = Math.hypot(ax, ay, az);
-  ax /= axisLength;
-  ay /= axisLength;
-  az /= axisLength;
+  const gradientTeslaPerMeter = state.sliceGradientMtM / 1000;
+  const offsetMeters = (sampleSliceMm(sample) - state.sliceCenterMm) / 1000;
+  return PROTON_GYROMAGNETIC_RATIO_HZ_T * gradientTeslaPerMeter * offsetMeters;
+}
 
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const crossX = ay * vz - az * vy;
-  const crossY = az * vx - ax * vz;
-  const crossZ = ax * vy - ay * vx;
+function sliceGradientPhaseCycles(sample, time, sequence = getSequenceConfig()) {
+  if (!state.sliceGradientEnabled) {
+    return 0;
+  }
 
-  return {
-    mx: vx * cos + crossX * sin,
-    my: vy * cos + crossY * sin,
-    mz: vz * cos + crossZ * sin,
-  };
+  const offsetHz = sliceGradientFrequencyOffsetHz(sample);
+  return offsetHz * sliceGradientEffectiveAreaSeconds(sequence, time);
+}
+
+function sliceGradientEffectiveAreaSeconds(sequence = getSequenceConfig(), time = 0) {
+  if (!state.sliceGradientEnabled) {
+    return 0;
+  }
+
+  const excitationCenter = sequence.rf90Center ?? sequence.rf90Seconds / 2;
+  if (time <= excitationCenter) {
+    return 0;
+  }
+
+  const rawArea = sliceGradientAreaSeconds(sequence, excitationCenter, time);
+  if (sequence.type !== 'spin-echo' || time <= sequence.refocusCenter) {
+    return rawArea;
+  }
+
+  const areaAtRefocus = sliceGradientAreaSeconds(sequence, excitationCenter, sequence.refocusCenter);
+  return 2 * areaAtRefocus - rawArea;
+}
+
+function sliceGradientAreaSeconds(sequence = getSequenceConfig(), startTime = 0, endTime = sequence.cycleSeconds) {
+  if (!state.sliceGradientEnabled) {
+    return 0;
+  }
+
+  let gradientSeconds = 0;
+  for (const lobe of sliceGradientWaveform(sequence)) {
+    const overlapStart = Math.max(startTime, lobe.start);
+    const overlapEnd = Math.min(endTime, lobe.end);
+    const overlap = clamp(overlapEnd - overlapStart, 0, lobe.end - lobe.start);
+    gradientSeconds += lobe.level * overlap;
+  }
+  return gradientSeconds;
 }
 
 function getSpinEchoEnvelope(localTime, sequence, t2Seconds, t2Inhom) {
-  const timeSinceExcitation = Math.max(0, localTime - sequence.rf90Seconds);
-  const refocused = localTime > sequence.refocusEnd;
+  const excitationCenter = sequence.rf90Center ?? sequence.rf90Seconds / 2;
+  const timeSinceExcitation = Math.max(0, localTime - excitationCenter);
+  const refocused = localTime >= sequence.refocusCenter;
   const inhomElapsed = refocused
     ? Math.abs(localTime - sequence.echoTime)
     : timeSinceExcitation;
@@ -1043,9 +1148,9 @@ function rebuildPhantom() {
   for (let ix = 0; ix < n; ix += 1) {
     for (let iy = 0; iy < n; iy += 1) {
       for (let iz = 0; iz < n; iz += 1) {
-        const x = -1 + ix * step + jitter(ix, iy, iz, 0) * step * 0.12;
-        const y = -1 + iy * step + jitter(ix, iy, iz, 1) * step * 0.12;
-        const z = -1 + iz * step + jitter(ix, iy, iz, 2) * step * 0.12;
+        const x = -1 + ix * step;
+        const y = -1 + iy * step;
+        const z = -1 + iz * step;
         const phantomSample = samplePhantom(x, y, z);
         const rho = phantomSample.rho;
 
@@ -1568,13 +1673,19 @@ function bindLoopControls() {
   window.__mrDemoGetSliceProbe = () => {
     const profiles = samples.map((sample) => sliceSelectionProfile(sample));
     const sequence = getSequenceConfig();
+    const waveform = sliceGradientWaveform(sequence);
+    const firstRephaseEnd = sequence.rf90Seconds + sequence.rf90Seconds / 2;
     return {
       enabled: state.sliceGradientEnabled,
       centerMm: state.sliceCenterMm,
       gradientMtM: state.sliceGradientMtM,
       bandwidthKhz: state.rfBandwidthKhz,
       thicknessMm: sliceThicknessMm(),
-      waveform: sliceGradientWaveform(sequence),
+      waveform,
+      excitationAreaSeconds: sliceGradientAreaSeconds(sequence, 0, sequence.rf90Seconds),
+      firstRephaseAreaSeconds: sliceGradientAreaSeconds(sequence, sequence.rf90Seconds, firstRephaseEnd),
+      firstNetAreaSeconds: sliceGradientAreaSeconds(sequence, 0, firstRephaseEnd),
+      firstEffectiveNetAreaSeconds: sliceGradientEffectiveAreaSeconds(sequence, firstRephaseEnd),
       ssgDuringRf: sliceGradientAt(sequence.rf90Seconds / 2, sequence),
       ssgRephase: sliceGradientAt(sequence.rf90Seconds * 1.25, sequence),
       ssgDuringRefocus: sequence.type === 'spin-echo'
@@ -1584,6 +1695,37 @@ function bindLoopControls() {
       minProfile: Math.min(...profiles),
       activeSamples: profiles.filter((profile) => profile > 0.5).length,
       inactiveSamples: profiles.filter((profile) => profile < 0.05).length,
+    };
+  };
+
+  window.__mrDemoGetSlicePhaseProbe = (timeSeconds = 0.0001) => {
+    const sequence = getSequenceConfig();
+    const time = Number(timeSeconds);
+    const halfThicknessMm = sliceThicknessMm() / 2;
+    const topSample = probeSampleAtSliceMm(state.sliceCenterMm + halfThicknessMm);
+    const bottomSample = probeSampleAtSliceMm(state.sliceCenterMm - halfThicknessMm);
+    const topMoment = getMomentAt(topSample, time, sequence);
+    const bottomMoment = getMomentAt(bottomSample, time, sequence);
+    const topGradientCycles = sliceGradientPhaseCycles(topSample, time, sequence);
+    const bottomGradientCycles = sliceGradientPhaseCycles(bottomSample, time, sequence);
+    const topOffsetHz = sliceGradientFrequencyOffsetHz(topSample);
+    const bottomOffsetHz = sliceGradientFrequencyOffsetHz(bottomSample);
+    const elapsedGradientSeconds = sliceGradientEffectiveAreaSeconds(sequence, time);
+
+    return {
+      timeSeconds: time,
+      bandwidthHz: state.rfBandwidthKhz * 1000,
+      elapsedGradientSeconds,
+      expectedDegrees: state.rfBandwidthKhz * 1000 * elapsedGradientSeconds * 360,
+      topOffsetHz,
+      bottomOffsetHz,
+      offsetDifferenceHz: topOffsetHz - bottomOffsetHz,
+      topGradientCycles,
+      bottomGradientCycles,
+      gradientPhaseDifferenceDegrees: cycleDifferenceDegrees(topGradientCycles, bottomGradientCycles),
+      momentPhaseDifferenceDegrees: phaseDifferenceDegrees(topMoment.phase, bottomMoment.phase),
+      topMoment,
+      bottomMoment,
     };
   };
 
@@ -2162,14 +2304,6 @@ function labelSprite(text, position, cssColor) {
   return sprite;
 }
 
-function jitter(ix, iy, iz, salt) {
-  return Math.sin(ix * 12.9898 + iy * 78.233 + iz * 37.719 + salt * 19.19) * 0.5;
-}
-
-function smoothstep(t) {
-  return t * t * (3 - 2 * t);
-}
-
 function degToRad(degrees) {
   return (degrees * Math.PI) / 180;
 }
@@ -2235,6 +2369,33 @@ function formatSpeed(speed) {
 
 function positiveModulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
+}
+
+function signedCycleDifference(cycles) {
+  return positiveModulo(cycles + 0.5, 1) - 0.5;
+}
+
+function cycleDifferenceDegrees(aCycles, bCycles) {
+  return signedCycleDifference(aCycles - bCycles) * 360;
+}
+
+function phaseDifferenceDegrees(aRadians, bRadians) {
+  return signedCycleDifference((aRadians - bRadians) / TAU) * 360;
+}
+
+function probeSampleAtSliceMm(sliceMm) {
+  const z = sliceMm / (PHANTOM_FOV_MM * 0.5);
+  return {
+    x: 0,
+    y: 0,
+    z,
+    rho: 1,
+    phaseOffset: 0,
+    offResBase: 0,
+    t1Scale: 1,
+    t2Scale: 1,
+    position: toThreePosition(0, 0, z).multiplyScalar(PHANTOM_SCENE_SCALE),
+  };
 }
 
 function lerp(start, end, amount) {
